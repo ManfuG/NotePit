@@ -1,0 +1,10 @@
+node_modules/
+dist/
+android/.gradle/
+android/local.properties
+android/**/build/
+android/.idea/
+*.apk
+*.log
+.DS_Store
+public/pdfjs/

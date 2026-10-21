@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NotePit</string>
+    <string name="title_activity_main">NotePit</string>
+    <string name="package_name">io.notepit.app</string>
+    <string name="custom_url_scheme">io.notepit.app</string>
+</resources>
