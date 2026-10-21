@@ -30,6 +30,8 @@ Node 22.12+, JDK 21, SDK 36. `npm ci`; `npm run android:build`. Default workstat
 
 APK: `android/app/build/outputs/apk/debug/app-debug.apk`. CI: `.github/workflows/android.yml` uploads `NotePit-debug`.
 
+CI must explicitly set `android-actions/setup-android` packages to `platform-tools`: the action's default `tools` package has been removed from Google's repository.
+
 Verified on API 36 emulator: real SAF picker/grant persistence, nested folders, Markdown filenames, text save/reopen, rename/filter/delete, conflict refusal preserving disk contents, PDF search and saved annotations. Browser smoke verified undo/redo, encoding rejection and mixed newline/BOM preservation. Android WebView debugging is available in debug builds through adb forwarding its `webview_devtools_remote_<pid>` socket; reattach after reinstall. No physical-device benchmark or unexercised API-level compatibility claim.
 
 GitHub repository: https://github.com/ManfuG/NotePit. It was empty on initialization; no existing issues required closing.
