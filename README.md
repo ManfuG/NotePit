@@ -2,6 +2,8 @@
 
 Offline-first Android document manager with global text search and optional, fully on-device hybrid semantic search. Native **Kotlin + Jetpack Compose / Material 3** UI and SAF storage; maintained **PDF.js** and **CodeMirror 6** document engines run in restricted, locally bundled WebViews. No account, cloud search, proprietary sync protocol or Anki integration.
 
+[PitVerse](https://giacomo-manfucci.pages.dev/pitverse/) · [NotePit project page](https://giacomo-manfucci.pages.dev/projects/notepit/) — Android information and download, not a browser document editor.
+
 The native launcher and Android splash share a cobalt/raspberry orbital notebook mark. A portfolio-derived orbital/botanical opening follows, branded **NotePit** in its own palette. Swipe up or activate the arrow to enter; it does not repeat on rotation or ordinary background/resume. The illustration is static, fully local and script-free, with no artificial delay.
 
 ## Install on Android

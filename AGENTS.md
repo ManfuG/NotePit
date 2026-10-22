@@ -69,3 +69,9 @@ Audited historical commits retaining personal metadata/content: `b1d4159670fd103
 - Publish the locally verified signed APK directly with checksum/certificate and `[skip ci]` source commits to avoid duplicate full CI runs, as in the existing QuantaPit release convention. Do not present historical CI as this release's evidence.
 - Final signed opening control uses explicit dark container/light border, independent of the user's light/dark document theme. Installed final0.4.1 over the previous signed build and exercised its arrow again; existing document state remained. Native JVM test task passed. APK:89,188,312 bytes; SHA256 `86c8e60289fa2c34daed6df80ff4b322f382acb7caef08dbed9e45c216699bb4`; certificate SHA256 `59a02fb817c1b42cfd1ef0d694cc4d6cdd79cb2dccf3f4a20392f9367c119609`.
 - Published immutable [v0.4.1](https://github.com/ManfuG/NotePit/releases/tag/v0.4.1) at source commit `e1f1225`. GitHub's stored SHA-256 digests for APK/checksum/certificate exactly match the locally exercised release. Documentation-only publication record follows the tag.
+
+## PitVerse website — 2026-10-22
+
+- The portfolio now groups the family under PitVerse: https://giacomo-manfucci.pages.dev/pitverse/ . NotePit has a static cobalt/raspberry information page at https://giacomo-manfucci.pages.dev/projects/notepit/ linking this repository and the latest Android release. Native code, storage, signing and release tags are unchanged.
+- Web content lives in the sibling portfolio's `projects/notepit/index.html` and shared `src/suite.css`, not the NotePit document-engine host. Do not turn the page into a fake web editor. The optional video was omitted because no existing suitable NotePit recording was available.
+- Production page/back/download destinations, mobile layouts and slash variants were checked; site deployment is https://18e7ddde.giacomo-manfucci.pages.dev. README cross-links added in a documentation-only GitHub update.
