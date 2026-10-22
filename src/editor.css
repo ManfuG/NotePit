@@ -1,4 +1,10 @@
 .text-editor {
+  --editor-primary: #3157d5;
+  --editor-text: #1b2030;
+  --editor-muted: #626b81;
+  --editor-background: #fafaff;
+  --editor-surface: #f0f1fa;
+  --editor-border: #d6dbea;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -7,58 +13,111 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  color: #e7eee9;
-  background: var(--surface, #fff);
+  color: var(--editor-text);
+  background: var(--editor-background);
+  color-scheme: light;
 }
 
+.text-editor[data-theme="dark"] {
+  --editor-primary: #b9c4ff;
+  --editor-text: #e3e6f3;
+  --editor-muted: #a4adc5;
+  --editor-background: #11141f;
+  --editor-surface: #1b2030;
+  --editor-border: #3a425a;
+  color-scheme: dark;
+}
+
+/* The native host resizes the WebView above the IME. Keep tools inside that viewport. */
 .text-editor-toolbar {
   display: flex;
   flex: 0 0 auto;
+  align-items: center;
   gap: 4px;
-  padding: 6px 10px;
+  padding: 5px 8px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--border, #dce1e7);
-  background: var(--surface, #fff);
+  border-top: 1px solid var(--editor-border);
+  background: var(--editor-surface);
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.text-editor-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .text-editor-toolbar button {
   flex: 0 0 auto;
+  min-width: 40px;
   min-height: 40px;
-  padding: 6px 10px;
-  border: 1px solid var(--border, #dce1e7);
+  padding: 6px 9px;
+  border: 1px solid var(--editor-border);
   border-radius: 8px;
   color: inherit;
   background: transparent;
-  font: inherit;
-  font-size: 13px;
+  font: 13px system-ui, sans-serif;
   touch-action: manipulation;
+}
+
+.text-editor-toolbar button[aria-pressed="true"] {
+  color: var(--editor-background);
+  background: var(--editor-primary);
+  border-color: var(--editor-primary);
 }
 
 .text-editor-toolbar button:disabled {
   opacity: 0.4;
 }
 
-.text-editor-toolbar button:focus-visible {
-  outline: 2px solid var(--accent, #2563eb);
+.text-editor-toolbar button:focus-visible,
+.text-editor .cm-search :focus-visible {
+  outline: 2px solid var(--editor-primary);
   outline-offset: 1px;
 }
 
-.text-editor-surface {
+.text-editor-surface,
+.text-editor-code {
   flex: 1;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.text-editor-surface {
+  display: flex;
+}
+
+.text-editor-preview {
+  flex: 1;
+}
+
+.text-editor [hidden] {
+  display: none !important;
 }
 
 .text-editor .cm-search button,
 .text-editor .cm-search input {
   min-height: 36px;
   margin: 3px;
+  border: 1px solid var(--editor-border);
+  border-radius: 5px;
+  color: var(--editor-text);
+  background: var(--editor-background);
   font: inherit;
+}
+
+.text-editor .cm-search input[type="checkbox"] {
+  min-height: auto;
+  accent-color: var(--editor-primary);
 }
 
 .text-editor .cm-search label {
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
+}
+
+.text-editor .cm-search button {
+  padding-inline: 8px;
 }

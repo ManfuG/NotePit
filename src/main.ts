@@ -1,215 +1,149 @@
-import { createElement, Folder, FileText, FileCode, File, ChevronRight, ArrowLeft, Plus, MoreVertical, RefreshCw, Search, FolderOpen, BookOpen } from 'lucide';
-import { files, native, readFile, fingerprint, toBase64, isPdf, isText } from './files';
-import type { Entry } from './files';
 import { openEditor } from './editor';
 import { openPdf } from './pdf';
+import type { DocumentHandle } from './document';
 import './style.css';
 
-type DocumentView = { save(): Promise<Uint8Array>; destroy(): void; markSaved?(): void };
-const app = document.querySelector<HTMLDivElement>('#app')!;
-app.innerHTML = `<header><div class="brand"><span class="brand-icon"></span><span>NotePit</span></div><span class="offline">Offline files</span></header>
-<section id="browser"><div class="heading"><h1>Files</h1><button id="add" class="primary">Add folder</button></div>
-<nav id="path" aria-label="Folder path"></nav><div class="tools"><label class="filter"><span id="search-icon"></span><input id="filter" type="search" placeholder="Filter this folder" aria-label="Filter this folder"></label><button id="refresh" class="icon" aria-label="Refresh"></button><button id="create" class="icon" aria-label="Create file or folder"></button></div>
-<div id="entries" role="list"></div><p id="count" class="muted"></p></section>
-<section id="document" hidden><div class="document-bar"><button id="back" class="icon" aria-label="Back to files"></button><div class="document-title"><strong id="filename"></strong><span id="file-state"></span></div><button id="save" class="primary">Save</button></div><div id="document-host"></div></section>
-<div id="status" role="status" hidden></div><dialog id="dialog"><form method="dialog"><h2 id="dialog-title"></h2><div id="dialog-body"></div><div id="dialog-actions"></div></form></dialog>`;
-const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const browserView = $('browser'), documentView = $('document'), host = $('document-host');
-const filter = $<HTMLInputElement>('filter'), saveButton = $<HTMLButtonElement>('save');
-const dialog = $<HTMLDialogElement>('dialog');
-const path: Entry[] = [];
-let entries: Entry[] = [], current: Entry | null = null, viewer: DocumentView | null = null;
-let dirty = false, busy = false, revision = '', loading = false, loadId = 0;
-let statusTimer: number;
-app.querySelector('.brand-icon')!.append(createElement(BookOpen));
-$('search-icon').append(createElement(Search));
-$('refresh').append(createElement(RefreshCw));
-$('create').append(createElement(Plus));
-$('back').append(createElement(ArrowLeft));
+interface EngineConfig {
+  name: string;
+  pdf: boolean;
+  readOnly: boolean;
+  dark: boolean;
+  state?: unknown;
+  journal?: unknown[];
+  sequence: number;
+  recoveredDirty: boolean;
+  url: string;
+}
+interface TransferAck { resolve: () => void; reject: (error: Error) => void }
+interface EngineHost {
+  open(config: EngineConfig): Promise<void>;
+  requestSave(copyName?: string | null): void;
+  flushDraft(request?: string): void;
+  acknowledge(purpose: string, sequence: number, success: boolean, error: string): void;
+  command(command: string): void;
+  setTheme(dark: boolean): void;
+}
+declare global {
+  interface Window {
+    NotePitNative?: { postMessage(message: string | ArrayBuffer): void };
+    NotePit: EngineHost;
+  }
+}
 
-function notify(message: string, error = false) {
-  const status = $('status');
-  status.textContent = message;
-  status.classList.toggle('error', error);
-  status.hidden = false;
-  clearTimeout(statusTimer);
-  statusTimer = window.setTimeout(() => { status.hidden = true; }, error ? 10000 : 3000);
+const host = document.querySelector<HTMLElement>('#app')!;
+let handle: DocumentHandle | undefined;
+let config: EngineConfig;
+let sequence = 0;
+let dirty = false;
+let recoveredDirty = false;
+let pdfNeedsDraft = false;
+let draftScheduled = false;
+let transfers: Promise<void> = Promise.resolve();
+const acknowledgements = new Map<string, TransferAck>();
+
+function post(event: Record<string, unknown>) {
+  window.NotePitNative?.postMessage(JSON.stringify(event));
 }
-function failure(error: unknown) {
-  if (error && typeof error === 'object' && 'code' in error && error.code === 'CANCELLED') return;
-  notify(error instanceof Error ? error.message : String(error), true);
+function report(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  post({ type: 'error', message });
+  if (!handle) host.textContent = message;
 }
-function updateDirty(value: boolean) {
-  dirty = value;
-  $('file-state').textContent = !current?.writable ? 'Read only' : dirty ? 'Unsaved changes' : 'Saved';
-  saveButton.disabled = !dirty || !current?.writable || busy;
+function theme(dark: boolean) {
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
 }
-function ask(title: string, options: { label: string; value: string; danger?: boolean }[], initial?: string): Promise<string | null> {
-  $('dialog-title').textContent = title;
-  $('dialog-body').replaceChildren();
-  let input: HTMLInputElement | undefined;
-  if (initial !== undefined) {
-    input = document.createElement('input'); input.value = initial; input.required = true;
-    input.autocomplete = 'off'; input.setAttribute('aria-label', 'Name');
-    $('dialog-body').append(input);
-  }
-  const actions = $('dialog-actions'); actions.replaceChildren();
-  for (const option of [...options, { label: 'Cancel', value: '' }]) {
-    const button = document.createElement('button');
-    button.textContent = option.label; button.value = option.value;
-    if (option.danger) button.className = 'danger';
-    if (!option.value) button.formNoValidate = true;
-    actions.append(button);
-  }
-  dialog.returnValue = '';
-  dialog.showModal();
-  input?.select();
-  const { promise, resolve } = Promise.withResolvers<string | null>();
-  dialog.addEventListener('close', () => resolve(dialog.returnValue ? input?.value.trim() ?? dialog.returnValue : null), { once: true });
-  return promise;
-}
-async function refresh() {
-  const id = ++loadId;
-  loading = true;
-  $('entries').textContent = 'Loading…';
-  try {
-    const result = !native ? { entries: [] } : path.length ? await files.list({ uri: path.at(-1)!.uri }) : await files.roots();
-    if (id !== loadId) return;
-    entries = result.entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name, undefined, { numeric: true }));
-    loading = false;
-    render();
-  } catch (error) {
-    if (id !== loadId) return;
-    entries = []; loading = false; render(); failure(error);
-  }
-}
-function render() {
-  const breadcrumbs = $('path'); breadcrumbs.replaceChildren();
-  const root = document.createElement('button'); root.textContent = 'Folders';
-  root.onclick = () => { path.length = 0; filter.value = ''; void refresh(); };
-  breadcrumbs.append(root);
-  path.forEach((entry, index) => {
-    breadcrumbs.append(createElement(ChevronRight));
-    const button = document.createElement('button'); button.textContent = entry.name;
-    button.onclick = () => { path.length = index + 1; filter.value = ''; void refresh(); };
-    breadcrumbs.append(button);
+function schedulePdfDraft() {
+  if (draftScheduled) return;
+  draftScheduled = true;
+  queueMicrotask(() => {
+    transfer('draft').then(() => {
+      draftScheduled = false;
+      if (pdfNeedsDraft) schedulePdfDraft();
+    }, error => { draftScheduled = false; report(error); });
   });
-  $<HTMLButtonElement>('create').disabled = !path.at(-1)?.writable || !native;
-  const list = $('entries'); list.replaceChildren();
-  const visible = entries.filter(entry => entry.name.toLocaleLowerCase().includes(filter.value.toLocaleLowerCase()));
-  for (const entry of visible) {
-    const row = document.createElement('div'); row.className = 'entry'; row.setAttribute('role', 'listitem');
-    const open = document.createElement('button'); open.className = 'entry-open';
-    const icon = createElement(entry.directory ? Folder : isPdf(entry.name) ? FileText : isText(entry.name) ? FileCode : File);
-    icon.classList.add(entry.directory ? 'folder-icon' : isPdf(entry.name) ? 'pdf-icon' : 'text-icon');
-    const text = document.createElement('span'); text.className = 'entry-text';
-    const name = document.createElement('strong'); name.textContent = entry.name;
-    const detail = document.createElement('span');
-    detail.textContent = entry.directory ? 'Folder' : `${entry.size < 1024 ? `${entry.size} B` : entry.size < 1048576 ? `${(entry.size / 1024).toFixed(1)} KB` : `${(entry.size / 1048576).toFixed(1)} MB`}${entry.writable ? '' : ' · Read only'}`;
-    text.append(name, detail); open.append(icon, text);
-    open.onclick = () => {
-      if (loading) return;
-      if (entry.directory) { path.push(entry); filter.value = ''; void refresh(); }
-      else void openDocument(entry);
+}
+function transfer(purpose: string, request = '', copyName?: string) {
+  const operation = transfers.catch(() => {}).then(async () => {
+    if (!handle) return;
+    handle.command?.('commit');
+    post({ type: 'state', state: handle.getState() });
+    if (purpose === 'draft' && (!config.pdf || !pdfNeedsDraft)) {
+      post({ type: 'checkpoint', request });
+      return;
+    }
+    const seq = sequence;
+    const bytes = await handle.save();
+    const ack = Promise.withResolvers<void>();
+    acknowledgements.set(`${purpose}:${seq}`, ack);
+    post({ type: 'transfer', purpose, seq, request, name: copyName });
+    // ArrayBuffer messaging avoids Base64 expansion/copying across the native boundary.
+    const buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer : bytes.slice().buffer;
+    window.NotePitNative?.postMessage(buffer as ArrayBuffer);
+    if (!window.NotePitNative) {
+      acknowledgements.delete(`${purpose}:${seq}`);
+      if (purpose === 'save') { handle.markSaved(); recoveredDirty = false; }
+      pdfNeedsDraft = sequence > seq;
+      return;
+    }
+    await ack.promise;
+  });
+  transfers = operation;
+  return operation;
+}
+
+window.NotePit = {
+  async open(value) {
+    handle?.destroy(); handle = undefined; host.replaceChildren();
+    config = value; sequence = value.sequence;
+    recoveredDirty = value.pdf && value.recoveredDirty;
+    pdfNeedsDraft = false; dirty = value.recoveredDirty;
+    theme(value.dark);
+    const options = {
+      name: value.name, readOnly: value.readOnly, dark: value.dark, state: value.state, journal: value.journal,
+      onDirty(changed: boolean) { dirty = changed || recoveredDirty; post({ type: 'dirty', dirty }); },
+      onState(state: unknown) { post({ type: 'state', state }); },
+      onJournal(data: unknown) {
+        sequence++;
+        post({ type: 'journal', seq: sequence, data });
+        if (value.pdf) { pdfNeedsDraft = true; schedulePdfDraft(); }
+      },
     };
-    const menu = document.createElement('button'); menu.className = 'icon'; menu.setAttribute('aria-label', `Options for ${entry.name}`);
-    menu.append(createElement(MoreVertical)); menu.onclick = () => { void entryMenu(entry); };
-    row.append(open, menu); list.append(row);
-  }
-  if (!visible.length) {
-    const empty = document.createElement('div'); empty.className = 'empty';
-    empty.append(createElement(FolderOpen));
-    const title = document.createElement('h2');
-    title.textContent = filter.value ? 'No matches' : path.length ? 'Empty folder' : 'Your folders, in one place';
-    const description = document.createElement('p');
-    description.textContent = filter.value ? 'Try a different filename.' : path.length ? 'Create a file or folder with +.' : native ? 'Add a local folder to open and edit its files.' : 'Install the Android app to connect local folders.';
-    empty.append(title, description); list.append(empty);
-  }
-  $('count').textContent = entries.length ? `${visible.length} ${path.length ? 'items' : 'folders'}` : '';
-}
-async function entryMenu(entry: Entry) {
-  const atRoot = path.length === 0;
-  const action = await ask(entry.name, atRoot ? [{ label: 'Disconnect folder', value: 'forget' }] : [
-    { label: 'Rename', value: 'rename' }, { label: 'Delete', value: 'delete', danger: true }
-  ]);
-  try {
-    if (action === 'forget') await files.forget({ uri: entry.uri });
-    if (action === 'rename') {
-      const name = await ask('Rename', [{ label: 'Rename', value: 'ok' }], entry.name);
-      if (!name || name === entry.name) return;
-      await files.rename({ uri: entry.uri, name });
+    if (value.pdf) handle = await openPdf(host, { ...options, url: value.url });
+    else {
+      const response = await fetch(value.url);
+      if (!response.ok) throw new Error('The document is temporarily unavailable. Its recovery files are retained.');
+      handle = await openEditor(host, { ...options, bytes: new Uint8Array(await response.arrayBuffer()) });
     }
-    if (action === 'delete') {
-      if (await ask(`Delete ${entry.name}${entry.directory ? ' and its contents' : ''}?`, [{ label: 'Delete permanently', value: 'delete', danger: true }]) !== 'delete') return;
-      await files.remove({ uri: entry.uri });
+    post({ type: 'ready' });
+    post({ type: 'dirty', dirty });
+  },
+  requestSave(copyName) { void transfer(copyName ? 'copy' : 'save', '', copyName ?? undefined).catch(report); },
+  flushDraft(request = '') { void transfer('draft', request).catch(error => { report(error); post({ type: 'checkpoint', request, error: error instanceof Error ? error.message : String(error) }); }); },
+  acknowledge(purpose, seq, success, error) {
+    const ack = acknowledgements.get(`${purpose}:${seq}`);
+    acknowledgements.delete(`${purpose}:${seq}`);
+    if (!success) { ack?.reject(new Error(error || 'Save failed. Edits are retained.')); return; }
+    if (purpose === 'save') {
+      recoveredDirty = false;
+      handle?.markSaved();
     }
-    if (action) await refresh();
-  } catch (error) { failure(error); }
-}
-async function openDocument(entry: Entry) {
-  if (busy || current) return;
-  if (!isPdf(entry.name) && !isText(entry.name)) { notify('This file type is not supported by the PDF reader or text editor.', true); return; }
-  current = entry; busy = true;
-  browserView.hidden = true; documentView.hidden = false;
-  $('filename').textContent = entry.name;
-  updateDirty(false); host.textContent = 'Opening…';
-  try {
-    const bytes = await readFile(entry);
-    revision = await fingerprint(bytes);
-    host.replaceChildren();
-    const options = { name: entry.name, bytes, readOnly: !entry.writable, onDirty: updateDirty };
-    viewer = isPdf(entry.name) ? await openPdf(host, options) : await openEditor(host, options);
-  } catch (error) {
-    viewer?.destroy(); viewer = null; current = null;
-    documentView.hidden = true; browserView.hidden = false; host.replaceChildren(); failure(error);
-  } finally { busy = false; updateDirty(dirty); }
-}
-async function save() {
-  if (!current || !viewer || !dirty || busy || !current.writable) return;
-  busy = true; updateDirty(dirty); saveButton.textContent = 'Saving…';
-  try {
-    const bytes = await viewer.save();
-    await files.save({ uri: current.uri, data: toBase64(bytes), revision });
-    revision = await fingerprint(bytes);
-    if (viewer.markSaved) viewer.markSaved();
-    else updateDirty(false);
-    notify('Saved');
-  } catch (error) { failure(error); }
-  finally { busy = false; saveButton.textContent = 'Save'; updateDirty(dirty); }
-}
-async function back() {
-  if (busy || dialog.open) return;
-  if (current) {
-    if (dirty && await ask('Discard unsaved changes?', [{ label: 'Discard', value: 'discard', danger: true }]) !== 'discard') return;
-    viewer?.destroy(); viewer = null; current = null; dirty = false;
-    host.replaceChildren(); documentView.hidden = true; browserView.hidden = false; await refresh();
-  } else if (path.length) { path.pop(); filter.value = ''; await refresh(); }
-}
-$('add').onclick = async () => {
-  if (!native) { notify('Folder access is available in the Android app.'); return; }
-  try { await files.pickFolder(); path.length = 0; filter.value = ''; await refresh(); } catch (error) { failure(error); }
+    if (purpose === 'save' || purpose === 'draft') pdfNeedsDraft = sequence > seq;
+    ack?.resolve();
+  },
+  command(command) { handle?.command?.(command); },
+  setTheme(dark) { theme(dark); config.dark = dark; handle?.command?.(`theme:${dark ? 'dark' : 'light'}`); },
 };
-$('refresh').onclick = () => { void refresh(); };
-$('create').onclick = async () => {
-  const parent = path.at(-1); if (!parent?.writable) return;
-  const kind = await ask('Create', [{ label: 'Text file', value: 'file' }, { label: 'Folder', value: 'folder' }]);
-  if (!kind) return;
-  const name = await ask(kind === 'folder' ? 'New folder' : 'New file', [{ label: 'Create', value: 'create' }], kind === 'folder' ? '' : 'untitled.txt');
-  if (!name) return;
-  try {
-    const { entry } = await files.create({ uri: parent.uri, name, directory: kind === 'folder' });
-    await refresh(); if (!entry.directory) await openDocument(entry);
-  } catch (error) { failure(error); }
-};
-filter.oninput = render;
-$('back').onclick = () => { void back(); };
-saveButton.onclick = () => { void save(); };
-window.addEventListener('notepit-back', event => {
-  if (dialog.open) { event.preventDefault(); dialog.close(); return; }
-  if (busy || current || path.length) { event.preventDefault(); void back(); }
-});
-window.addEventListener('beforeunload', event => { if (dirty) event.preventDefault(); });
+
+window.addEventListener('visibilitychange', () => { if (document.hidden) window.NotePit.flushDraft(); });
 window.addEventListener('keydown', event => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void save(); }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); window.NotePit.requestSave(); }
 });
-void refresh();
+const session = new URLSearchParams(location.search).get('session');
+if (session && window.NotePitNative) {
+  fetch(`/session/${encodeURIComponent(session)}/config`).then(async response => {
+    if (!response.ok) throw new Error('Unable to recover this document session.');
+    await window.NotePit.open(await response.json());
+  }).catch(report);
+} else host.textContent = 'Open a document in the Android app.';

@@ -2,29 +2,75 @@ name: Android
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
+          cache: gradle
+      - uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
       - run: npm ci
       - run: npm run android:build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
+        if: always()
         with:
           name: NotePit-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - run: npm test
+      - run: npm run android:test
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: NotePit-unit-test-results
+          path: |
+            android/app/build/reports/tests/testDebugUnitTest/
+            android/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+      - name: Prepare private release signing
+        id: signing
+        if: github.event_name != 'pull_request'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const { ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
+          if (ANDROID_KEYSTORE_BASE64 && ANDROID_KEYSTORE_PASSWORD) {
+            writeFileSync(join(RUNNER_TEMP, 'notepit-release.jks'), Buffer.from(ANDROID_KEYSTORE_BASE64, 'base64'), { mode: 0o600, flag: 'wx' });
+            appendFileSync(GITHUB_OUTPUT, 'ready=true\n');
+          }
+          NODE
+      - name: Build signed release
+        if: steps.signing.outputs.ready == 'true'
+        env:
+          NOTEPIT_KEYSTORE: ${{ runner.temp }}/notepit-release.jks
+          NOTEPIT_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: npm run android:release
+      - uses: actions/upload-artifact@v6
+        if: success() && steps.signing.outputs.ready == 'true'
+        with:
+          name: NotePit-release
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/notepit-release.jks"

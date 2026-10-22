@@ -8,3 +8,6 @@ android/.idea/
 *.log
 .DS_Store
 public/pdfjs/
+.signing/
+*.jks
+*.keystore

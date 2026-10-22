@@ -58,25 +58,60 @@ try {
   await writeFile(join(staging, 'web/notepit.css'), `/* NotePit shell owns opening, saving and navigation. */
 #secondaryOpenFile, #printButton, #secondaryPrint, #downloadButton,
 #secondaryDownload, #presentationMode, #viewBookmark, #editorModeSeparator,
-#attachmentsViewMenu, #viewsManagerStatusActionExport { display: none !important; }
+#attachmentsViewMenu, #viewsManagerAddFileButton, #viewsManagerStatusActionExport { display: none !important; }
 html.notepit-readonly #editorModeButtons { display: none !important; }
+/* Keep PDF.js 6's viewsManager selector and outlinesViewMenu visible: they
+   provide the actual embedded document outline, not NotePit page bookmarks. */
 #toolbarViewer > * { min-width: 0; }
+#toolbarContainer { height: 84px; padding: 0; }
+#toolbarContainer #toolbarViewer { height: 44px; }
+#viewerContainer { top: 84px; }
+#loadingBar { top: 84px !important; }
+.notepit-reader-tools {
+  box-sizing: border-box; height: 40px; display: flex; align-items: center;
+  gap: 6px; padding: 3px 8px; overflow-x: auto; white-space: nowrap;
+  border-top: 1px solid light-dark(#d9ddeb, #343c52);
+  background: light-dark(#fafaff, #1b2030); color: light-dark(#22263a, #e7e9f5);
+}
+.notepit-reader-tools button, .notepit-reader-tools select {
+  flex-shrink: 0; min-height: 32px; border: 1px solid light-dark(#c2c9df, #48516d);
+  border-radius: 6px; padding: 4px 9px; font: inherit; font-size: 12px;
+  background: transparent; color: inherit;
+}
+.notepit-reader-tools button[aria-pressed="true"] {
+  background: light-dark(#e3e9ff, #31416e); border-color: light-dark(#3157d5, #b9c4ff);
+}
+.notepit-reader-tools :focus-visible { outline: 2px solid light-dark(#3157d5, #b9c4ff); }
+html.notepit-dark { color-scheme: dark; }
+html:not(.notepit-dark) { color-scheme: light; }
+.pdfViewer .page.notepit-cropped {
+  overflow: clip;
+  width: calc(var(--total-scale-factor) * var(--notepit-crop-width)) !important;
+  height: calc(var(--total-scale-factor) * var(--notepit-crop-height)) !important;
+}
+.pdfViewer .page.notepit-cropped > :is(.canvasWrapper, .textLayer, .annotationLayer, .annotationEditorLayer, .drawLayer, .xfaLayer) {
+  translate: calc(-1 * var(--total-scale-factor) * var(--notepit-crop-left))
+    calc(-1 * var(--total-scale-factor) * var(--notepit-crop-top));
+}
+.pdfViewer .page.notepit-cropped > .canvasWrapper {
+  width: calc(var(--total-scale-factor) * var(--notepit-full-width));
+  height: calc(var(--total-scale-factor) * var(--notepit-full-height));
+}
 @media (max-width: 900px) {
-  #toolbarContainer { height: 88px; }
-  #toolbarContainer #toolbarViewer { flex-wrap: wrap; align-content: center; }
+  #toolbarContainer { height: 128px; }
+  #toolbarContainer #toolbarViewer { height: 88px; flex-wrap: wrap; align-content: center; }
   #toolbarContainer #toolbarViewerLeft { margin-inline-start: 0; }
   #toolbarViewerLeft, #toolbarViewerMiddle, #toolbarViewerRight { height: 42px; }
   #toolbarViewerRight { width: 100%; justify-content: center; }
-  #viewerContainer { top: 88px; }
-  #loadingBar { top: 88px !important; }
+  #viewerContainer { top: 128px; }
+  #loadingBar { top: 128px !important; }
   #toolbarViewer .verticalToolbarSeparator { display: none; }
   #findbar { max-width: calc(100vw - 16px); inset-inline-start: 0; }
   #viewsManager { max-width: 100vw; }
-  html.notepit-readonly #toolbarContainer { height: 44px; }
-  html.notepit-readonly #toolbarViewerRight { width: auto; }
-  html.notepit-readonly #viewerContainer { top: 44px; }
-  html.notepit-readonly #loadingBar { top: 44px !important; }
 }
+html.notepit-immersive #toolbarContainer { display: none !important; }
+html.notepit-immersive #viewerContainer { top: 0 !important; }
+html.notepit-immersive #loadingBar { top: 0 !important; }
 `);
   await writeFile(join(staging, '.notepit-source'), stamp);
   await rm(target, { recursive: true, force: true });
