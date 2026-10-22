@@ -154,6 +154,6 @@ adb shell am instrument -w -r \
 
 Current project examples and documentation use generic identities; third-party attribution is retained. The audit found no probable committed live credentials or private signing keys. Four pre-existing commits retain personal author/committer metadata and older documentation references. No published history was rewritten: removing that exposure requires a separately coordinated history cleanup, including existing clones and cached artifacts. Use privacy-safe author/committer settings for future commits.
 
-### 0.4.1 — suite alignment and security
+### [0.4.1](https://github.com/ManfuG/NotePit/releases/tag/v0.4.1) — suite alignment and security
 
 Adds the NotePit-branded opening described above, retaining existing documents, drafts and signing identity. Updated Node/CI security floors and the build-only fflate dependency. [PHP2Shell](https://github.com/NCSC-NL/php2shell) has no identified PHP runtime here; the [October Node advisories](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) apply to build/download tooling, not an Android Node server. Clean installation and npm audit report zero known findings. Twelve editor invariants and signed API 36 opening/dismissal/resume checks passed. Release binaries are locally built and verified; duplicate hosted CI is skipped.
