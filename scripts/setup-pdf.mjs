@@ -47,6 +47,38 @@ try {
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(destination, bytes);
   }
+  // NotePit modification: snapshot FreeText without disabling contenteditable.
+  // Toggling it closes Android's IME and asynchronously resets multiline carets.
+  const enginePath = join(staging, 'build/pdf.mjs');
+  let engine = await readFile(enginePath, 'utf8');
+  const commit = `  commit() {
+    if (!this.isInEditMode()) {
+      return;
+    }
+    super.commit();
+    this.disableEditMode();
+    const savedText = this.#content;`;
+  if (engine.indexOf(commit) < 0 || engine.indexOf(commit) !== engine.lastIndexOf(commit)) {
+    throw new Error('Unexpected upstream PDF.js FreeText commit implementation.');
+  }
+  engine = engine.replace(commit, commit.replace('commit()', 'commit(keepEditing = false)')
+    .replace('    this.disableEditMode();', '    // NotePit: retain Android IME and caret while snapshotting drafts.\n    if (keepEditing !== true) this.disableEditMode();'));
+  // Repositioning a live multiline editor also resets Android's native caret.
+  // Refresh its serialized dimensions now; constrain its position on real commit.
+  const geometryEdits = [
+    ['  #setEditorDimensions() {', '  #setEditorDimensions(keepPosition = false) {'],
+    ['    this.fixAndSetPosition();\n  }\n  commit(keepEditing = false) {',
+      '    if (!keepPosition) this.fixAndSetPosition();\n  }\n  commit(keepEditing = false) {'],
+    ['      mustExec: false\n    });\n    this.#setEditorDimensions();\n  }\n  shouldGetKeyboardEvents() {',
+      '      mustExec: false\n    });\n    this.#setEditorDimensions(keepEditing === true);\n  }\n  shouldGetKeyboardEvents() {'],
+  ];
+  for (const [before, after] of geometryEdits) {
+    if (engine.indexOf(before) < 0 || engine.indexOf(before) !== engine.lastIndexOf(before)) {
+      throw new Error('Unexpected upstream PDF.js FreeText geometry implementation.');
+    }
+    engine = engine.replace(before, after);
+  }
+  await writeFile(enginePath, engine);
   const htmlPath = join(staging, 'web/viewer.html');
   let html = await readFile(htmlPath, 'utf8');
   const stylesheet = '<link rel="stylesheet" href="viewer.css" />';

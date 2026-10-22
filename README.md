@@ -68,7 +68,7 @@ Only the companion's public launcher is used. No undocumented pairing/configurat
 - File operations, hashing, transfer verification and network requests run off the UI thread. Stale listings/searches are cancellable.
 - An immutable private snapshot and SHA-256 revision protect an open file. External metadata changes are reported; saves recheck content and refuse stale overwrites. **Reload original** and **Save a separate copy** let you resolve the situation explicitly.
 - Saves retain a persistent original backup and verify the written bytes; failed writes trigger best-effort verified restoration. Failed recovery reports the retained original's private path.
-- Text changes are journaled incrementally to private storage; PDF annotation changes produce serialized private drafts. Reading state and open-document identities are durable. Original files change only on explicit save.
+- Text changes are journaled incrementally to private storage; PDF annotation changes produce debounced private drafts without blocking typing. Reading state and open-document identities are durable. Original files change only on explicit save.
 - SAF has no transactional compare-and-swap against another writer. An external writer can still race a check; provider/device failures and sudden power loss are not atomic-save guarantees. Avoid editing the same document simultaneously.
 - Draft recovery protects completed journal/draft writes, not an uncommitted keystroke killed before it reaches persistent storage. Keep backups and save important work. Renderer memory/file capacity still depends on the device.
 
@@ -94,13 +94,13 @@ npm run android:release
 
 Signed APK: `android/app/build/outputs/apk/release/app-release.apk`. The first explicit local release creates private `.signing/keystore.jks` and `config.json`; back up that directory securely. Losing the key prevents compatible future updates. CI uses repository secrets `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`; keys/passwords are never committed.
 
-Builds provision the pinned official PDF.js 6.4.299 legacy distribution with its published SHA-256, local worker/fonts/CMaps/WASM, and offline math assets. Third-party notices are generated from locked runtime dependencies. GitHub Actions builds APKs, runs editor tests and invokes the JVM test task; device instrumentation was run locally, not claimed as CI emulator coverage.
+Builds provision the pinned official PDF.js 6.4.299 legacy distribution with its published SHA-256, local worker/fonts/CMaps/WASM, and offline math assets. A guarded FreeText snapshot patch keeps Android's keyboard/caret intact during drafts; builds reject an unexpected upstream implementation. Third-party notices are generated from locked runtime dependencies. GitHub Actions builds APKs, runs editor tests and invokes the JVM test task; device instrumentation was run locally, not claimed as CI emulator coverage.
 
 ### Exercised verification
 
 - **12 Node tests:** encoding/BOM, mixed newline edits/undo/redo, inferred indentation, malformed journals and replay.
 - **26 Android instrumentation tests:** real resolver/provider streams via an isolated test provider, transfer integrity/collisions/cancellation/partial failures, save conflicts/restoration/recovery, metadata/permissions/cache behavior, loopback authentication, encrypted credentials, service identity and status parsing.
-- **Running API 36 emulator:** real SAF authorization, code edit/save to original bytes, persistent grant and unsaved-text recovery after force-stop/restart, native multi-document UI.
+- **Running API 36 emulator:** real SAF authorization, code edit/save to original bytes, persistent grant and unsaved-text recovery after force-stop/restart, native multi-document UI. PDF single/multiline typing survived idle native drafts with zero focus losses; the complete saved annotation was independently parsed from the original shared-storage PDF.
 - **Browser document engines:** sanitized Markdown/math preview; 120-page PDF on-demand rendering, crop navigation and reading-state/bookmark restoration; five-entry PDF outline. A crop-induced page-jump regression was reproduced and fixed.
 - **Two isolated real Syncthing 2.1.7 engines:** verified A→B transfer, B→A reconciliation after pausing/reconnecting peers, and preservation of both concurrent edits as conflict copies.
 

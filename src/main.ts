@@ -38,6 +38,7 @@ let dirty = false;
 let recoveredDirty = false;
 let pdfNeedsDraft = false;
 let draftScheduled = false;
+let draftTimer: number | undefined;
 let transfers: Promise<void> = Promise.resolve();
 const acknowledgements = new Map<string, TransferAck>();
 
@@ -54,19 +55,20 @@ function theme(dark: boolean) {
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
 }
 function schedulePdfDraft() {
+  clearTimeout(draftTimer);
   if (draftScheduled) return;
-  draftScheduled = true;
-  queueMicrotask(() => {
+  draftTimer = window.setTimeout(() => {
+    draftScheduled = true;
     transfer('draft').then(() => {
       draftScheduled = false;
       if (pdfNeedsDraft) schedulePdfDraft();
     }, error => { draftScheduled = false; report(error); });
-  });
+  }, 350);
 }
 function transfer(purpose: string, request = '', copyName?: string) {
   const operation = transfers.catch(() => {}).then(async () => {
     if (!handle) return;
-    handle.command?.('commit');
+    handle.command?.(purpose === 'draft' && !request ? 'snapshot' : 'commit');
     post({ type: 'state', state: handle.getState() });
     if (purpose === 'draft' && (!config.pdf || !pdfNeedsDraft)) {
       post({ type: 'checkpoint', request });
@@ -120,7 +122,10 @@ window.NotePit = {
     post({ type: 'dirty', dirty });
   },
   requestSave(copyName) { void transfer(copyName ? 'copy' : 'save', '', copyName ?? undefined).catch(report); },
-  flushDraft(request = '') { void transfer('draft', request).catch(error => { report(error); post({ type: 'checkpoint', request, error: error instanceof Error ? error.message : String(error) }); }); },
+  flushDraft(request = 'background') {
+    clearTimeout(draftTimer);
+    void transfer('draft', request).catch(error => { report(error); post({ type: 'checkpoint', request, error: error instanceof Error ? error.message : String(error) }); });
+  },
   acknowledge(purpose, seq, success, error) {
     const ack = acknowledgements.get(`${purpose}:${seq}`);
     acknowledgements.delete(`${purpose}:${seq}`);

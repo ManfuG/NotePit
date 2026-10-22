@@ -19,6 +19,7 @@ interface PageView {
 }
 interface EditorManager {
   endCurrentEditing(): void;
+  getEditor(id: string): { commit(keepEditing?: boolean): void } | undefined;
   addCommands(...args: unknown[]): void;
   undo(...args: unknown[]): void;
   redo(...args: unknown[]): void;
@@ -48,6 +49,7 @@ interface ViewerApplication {
     firstPagePromise: Promise<unknown>;
     currentPageNumber: number;
     currentScaleValue: string;
+    currentScale: number;
     pagesRotation: number;
     container: HTMLDivElement;
     _layerProperties: { annotationEditorUIManager?: EditorManager };
@@ -235,6 +237,19 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
       if (existed) modified();
     };
     cleanups.push(() => { storage.setValue = setValue; storage.remove = remove; });
+    inner.addEventListener('input', event => {
+      const target = event.target as Element | null;
+      if (target?.nodeType === 1 && target.closest('.annotationEditorLayer, .annotationLayer')) modified();
+    }, { signal: events.signal });
+    inner.addEventListener('focusin', event => {
+      const target = event.target as Element | null;
+      // PDF.js reapplies fit presets on an IME height resize and commits the
+      // active editor. Keep the same numeric scale while entering annotations.
+      if (target?.closest('.annotationEditorLayer, .annotationLayer') &&
+          ['auto', 'page-fit', 'page-width'].includes(pdfViewer.currentScaleValue)) {
+        pdfViewer.currentScaleValue = String(pdfViewer.currentScale);
+      }
+    }, { signal: events.signal });
     let canUndo = false;
     let canRedo = false;
     viewer.eventBus.on('editingstateschanged', ({ details }: { details: { hasSomethingToUndo?: boolean; hasSomethingToRedo?: boolean } }) => {
@@ -517,9 +532,7 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
       save() {
         if (destroyed) return Promise.reject(new Error('The PDF reader is closed.'));
         if (serialization) return serialization;
-        manager?.endCurrentEditing();
         const savingGeneration = generation;
-        frame.inert = true;
         serialization = (async () => {
           // Unchanged URL sources fetch bytes only upon an explicit save/draft
           // request. getData obtains the original through the existing worker.
@@ -531,13 +544,11 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
           return bytes;
         })().finally(() => {
           serialization = undefined;
-          frame.inert = false;
         });
         return serialization;
       },
       markSaved() {
         if (destroyed) return;
-        manager?.endCurrentEditing();
         options.onDirty(!options.readOnly && generation !== serializedGeneration);
       },
       getState,
@@ -545,6 +556,13 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
         if (destroyed) return;
         switch (command) {
           case 'commit': manager?.endCurrentEditing(); break;
+          case 'snapshot': {
+            const input = inner.activeElement;
+            const element = input?.closest('.freeTextEditor');
+            const editor = element && input?.getAttribute('contenteditable') === 'true' ? manager?.getEditor(element.id) : undefined;
+            if (input?.textContent) editor?.commit(true);
+            break;
+          }
           case 'immersive:on':
           case 'immersive:off':
             inner.documentElement.classList.toggle('notepit-immersive', command === 'immersive:on');
