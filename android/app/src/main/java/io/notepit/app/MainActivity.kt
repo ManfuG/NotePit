@@ -62,6 +62,7 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
     var themeDialog by rememberSaveable { mutableStateOf(false) }
     var immersive by rememberSaveable { mutableStateOf(false) }
     var closing by remember { mutableStateOf<OpenDocument?>(null) }
+    var opening by rememberSaveable { mutableStateOf(true) }
     var reload by remember { mutableStateOf<OpenDocument?>(null) }
     var copying by remember { mutableStateOf<OpenDocument?>(null) }
     var copyName by rememberSaveable { mutableStateOf("") }
@@ -93,9 +94,9 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
         val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
         SideEffect {
             val insets = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
-            insets.isAppearanceLightStatusBars = !dark
-            insets.isAppearanceLightNavigationBars = !dark
-            if (immersive && active != null) insets.hide(WindowInsetsCompat.Type.systemBars()) else insets.show(WindowInsetsCompat.Type.systemBars())
+            insets.isAppearanceLightStatusBars = !opening && !dark
+            insets.isAppearanceLightNavigationBars = !opening && !dark
+            if (!opening && immersive && active != null) insets.hide(WindowInsetsCompat.Type.systemBars()) else insets.show(WindowInsetsCompat.Type.systemBars())
             engines.values.forEach { it.theme(dark) }
         }
         LaunchedEffect(model.message) {
@@ -113,6 +114,10 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
             lifecycle.lifecycle.addObserver(observer)
             model.setForeground(lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             onDispose { lifecycle.lifecycle.removeObserver(observer); model.setForeground(false) }
+        }
+        if (opening) {
+            OpeningScreen { opening = false }
+            return@NotePitTheme
         }
         BackHandler(active != null || sync || model.searchVisible) {
             if (immersive) { immersive = false; active?.let { engines[it.id]?.command("immersive:off") } }

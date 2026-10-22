@@ -10153,3 +10153,12 @@ Source: https://github.com/uclouvain/openjpeg/blob/v2.5.4/LICENSE
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+========================================================================
+Opening illustration — Taurus constellation
+========================================================================
+
+Adapted from the NOIRLab / Sky & Telescope Taurus constellation pattern through giacomo-portfolio and HanPit, recolored for NotePit.
+https://noirlab.edu/public/education/constellations/taurus/
+Licensed under Creative Commons Attribution 4.0 International.
+https://creativecommons.org/licenses/by/4.0/
+

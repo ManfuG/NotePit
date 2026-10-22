@@ -2,7 +2,7 @@
 
 Offline-first Android document manager with global text search and optional, fully on-device hybrid semantic search. Native **Kotlin + Jetpack Compose / Material 3** UI and SAF storage; maintained **PDF.js** and **CodeMirror 6** document engines run in restricted, locally bundled WebViews. No account, cloud search, proprietary sync protocol or Anki integration.
 
-The native launcher and startup splash share a cobalt/raspberry orbital notebook mark, using the xPit suite's orbital geometry. The splash follows Android's normal startup lifecycle: no blocking entry page or artificial display delay.
+The native launcher and Android splash share a cobalt/raspberry orbital notebook mark. A portfolio-derived orbital/botanical opening follows, branded **NotePit** in its own palette. Swipe up or activate the arrow to enter; it does not repeat on rotation or ordinary background/resume. The illustration is static, fully local and script-free, with no artificial delay.
 
 ## Install on Android
 
@@ -93,7 +93,7 @@ Only the companion's public launcher is used. No undocumented pairing/configurat
 
 ## Build and tests
 
-Requires Node 22.12+, **JDK 21** and Android SDK 36. Set `JAVA_HOME` and `ANDROID_HOME`, or keep the SDK location in ignored `android/local.properties`.
+Requires Node **22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x)**, **JDK 21** and Android SDK 36. Set `JAVA_HOME` and `ANDROID_HOME`, or keep the SDK location in ignored `android/local.properties`.
 
 ```sh
 npm ci
@@ -153,3 +153,7 @@ adb shell am instrument -w -r \
 ### Repository privacy
 
 Current project examples and documentation use generic identities; third-party attribution is retained. The audit found no probable committed live credentials or private signing keys. Four pre-existing commits retain personal author/committer metadata and older documentation references. No published history was rewritten: removing that exposure requires a separately coordinated history cleanup, including existing clones and cached artifacts. Use privacy-safe author/committer settings for future commits.
+
+### 0.4.1 — suite alignment and security
+
+Adds the NotePit-branded opening described above, retaining existing documents, drafts and signing identity. Updated Node/CI security floors and the build-only fflate dependency. [PHP2Shell](https://github.com/NCSC-NL/php2shell) has no identified PHP runtime here; the [October Node advisories](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) apply to build/download tooling, not an Android Node server. Clean installation and npm audit report zero known findings. Twelve editor invariants and signed API 36 opening/dismissal/resume checks passed. Release binaries are locally built and verified; duplicate hosted CI is skipped.
