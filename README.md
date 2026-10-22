@@ -1,14 +1,31 @@
-# NotePit 0.4
+# NotePit
 
-Offline-first Android document manager with global text search and optional, fully on-device hybrid semantic search. Native **Kotlin + Jetpack Compose / Material 3** UI and SAF storage; maintained **PDF.js** and **CodeMirror 6** document engines run in restricted, locally bundled WebViews. No account, cloud search, proprietary sync protocol or Anki integration.
+Offline-first Android document manager, PDF reader and code editor with local full-text and optional on-device semantic search. Native Kotlin/Jetpack Compose UI and SAF storage; PDF.js and CodeMirror run in restricted local WebViews. No account or cloud search.
 
-[PitVerse](https://giacomo-manfucci.pages.dev/pitverse/) · [NotePit project page](https://giacomo-manfucci.pages.dev/projects/notepit/) — Android information and download, not a browser document editor.
+[![PitVerse](https://img.shields.io/badge/PitVerse-suite-75dbca)](https://giacomo-manfucci.pages.dev/pitverse/)
+[![Release](https://img.shields.io/github/v/release/ManfuG/NotePit)](https://github.com/ManfuG/NotePit/releases/latest)
+
+## Try and download
+
+**[Download NotePit for Android — app-release.apk](https://github.com/ManfuG/NotePit/releases/latest/download/app-release.apk)**
+
+[Project page](https://giacomo-manfucci.pages.dev/projects/notepit/) · [Latest release and checksums](https://github.com/ManfuG/NotePit/releases/latest)
+
+Current release: **[0.4.1](https://github.com/ManfuG/NotePit/releases/tag/v0.4.1)** (Android version code 5), including the branded opening and security-tooling updates. Android-only: the project page is not a browser document editor. Requires Android **8.0/API 26+** and an updated Android System WebView.
+
+## Demo
+
+[<img src="docs/home.webp" alt="Watch NotePit on Android: Markdown editing, local PDFs and document search" width="270">](https://github.com/ManfuG/NotePit/raw/refs/heads/main/docs/demo.mp4)
+
+**[Watch or download the Android demo (MP4, 54 seconds, no audio)](https://github.com/ManfuG/NotePit/raw/refs/heads/main/docs/demo.mp4)**
+
+Recorded from the signed 0.4.1 app on an Android emulator: opening, granted-folder browsing, Markdown/math preview, editing and saving an original note, PDF reading, and keyword search across the note and PDF. Uses demonstration documents in a separate Android user; no personal files or model download.
 
 The native launcher and Android splash share a cobalt/raspberry orbital notebook mark. A portfolio-derived orbital/botanical opening follows, branded **NotePit** in its own palette. Swipe up or activate the arrow to enter; it does not repeat on rotation or ordinary background/resume. The illustration is static, fully local and script-free, with no artificial delay.
 
 ## Install on Android
 
-1. Download **app-release.apk** from this repository's latest **Releases** page.
+1. Download **[app-release.apk](https://github.com/ManfuG/NotePit/releases/latest/download/app-release.apk)** above.
 2. Allow installation from the browser/file manager when Android asks, then install. Keep Android System WebView updated.
 3. Open **Connect folder**, select a subfolder such as `Documents/Notes`, and grant access. Repeat for additional folders. Android restricts storage roots, Download root and `Android/data`.
 4. Open documents, edit and explicitly **Save** to their original locations. Closing an edited document offers saving, retaining a draft or discarding changes.
