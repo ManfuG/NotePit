@@ -80,6 +80,9 @@ class DocumentsRepository(context: Context) {
     private val cache = LinkedHashMap<String, List<DocumentEntry>>(16, .75f, true)
     private val recoveryDirectory get() = File(context.filesDir, "recovery")
 
+    /** Last published grant state; search reads never wait for a provider's blocking stream. */
+    internal fun connectedRootsSnapshot(): List<DocumentEntry> = rootEntries
+
     init {
         scope.launch {
             try { mutex.withLock { load() } }
@@ -344,9 +347,10 @@ class DocumentsRepository(context: Context) {
         }
     }
 
-    suspend fun snapshot(entry: DocumentEntry, target: File): String = withContext(Dispatchers.IO) {
+    suspend fun snapshot(entry: DocumentEntry, target: File, maxBytes: Long = Long.MAX_VALUE): String = withContext(Dispatchers.IO) {
         mutex.withLock {
             load()
+            require(maxBytes >= 0) { "The snapshot size limit must be nonnegative." }
             requirePrivate(target)
             if (queryRaw(entry).directory) throw IOException("A folder cannot be opened as a document.")
             val parent = target.parentFile ?: throw IOException("No snapshot directory.")
@@ -355,7 +359,7 @@ class DocumentsRepository(context: Context) {
             try {
                 val revision = readDocument(Uri.parse(entry.uri)) { input ->
                     FileOutputStream(temporary).use { output ->
-                        val hash = copyBytes(input, output)
+                        val hash = copyBytes(input, output, maxBytes)
                         output.fd.sync()
                         hash
                     }
@@ -623,7 +627,7 @@ class DocumentsRepository(context: Context) {
 
     private suspend fun hashDocument(uri: Uri): String = readDocument(uri) { copyBytes(it, null) }
 
-    private suspend fun copyBytes(input: InputStream, output: OutputStream?): String {
+    private suspend fun copyBytes(input: InputStream, output: OutputStream?, maxBytes: Long = Long.MAX_VALUE): String {
         val cancellation = currentCoroutineContext()
         return suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation {
@@ -636,11 +640,14 @@ class DocumentsRepository(context: Context) {
             try {
                 val digest = MessageDigest.getInstance("SHA-256")
                 val buffer = ByteArray(64 * 1024)
+                var copied = 0L
                 while (true) {
                     cancellation.ensureActive()
                     val count = input.read(buffer)
                     if (count < 0) break
                     if (count == 0) continue
+                    if (count.toLong() > maxBytes - copied) throw IOException("The document exceeds the $maxBytes-byte search indexing limit.")
+                    copied += count
                     digest.update(buffer, 0, count)
                     output?.write(buffer, 0, count)
                 }

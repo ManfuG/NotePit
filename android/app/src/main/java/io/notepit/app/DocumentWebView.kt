@@ -29,6 +29,7 @@ private const val ENGINE_ORIGIN = "https://appassets.androidplatform.net"
 @SuppressLint("SetJavaScriptEnabled")
 class DocumentWebView(context: Context, val session: OpenDocument, private val sessions: DocumentSessions, dark: Boolean) {
     val view = WebView(context.applicationContext)
+    val generation = session.reload
     private var darkMode = dark
     private var pendingTransfer: JSONObject? = null
     private val checkpoints = mutableMapOf<String, CompletableDeferred<Unit>>()
@@ -136,6 +137,30 @@ class DocumentWebView(context: Context, val session: OpenDocument, private val s
         evaluate("window.NotePit?.requestSave(${if (copyName == null) "null" else JSONObject.quote(copyName)})")
     }
     fun command(command: String) = evaluate("window.NotePit?.command(${JSONObject.quote(command)})")
+    suspend fun revealPending() {
+        if (!ready || destroyed || sessions.activeId != session.id) return
+        val pending = session.pendingReveal ?: return
+        sessions.verifySearchSource(session)
+        if (!ready || destroyed || sessions.activeId != session.id || session.pendingReveal !== pending) return
+        if (session.externalChanged && !session.dirty) {
+            // A search click opens the current original, but never discards an edited buffer.
+            flush().await()
+            if (destroyed || sessions.activeId != session.id || session.pendingReveal !== pending) return
+            if (!session.dirty) {
+                destroy()
+                sessions.reload(session)
+                return
+            }
+        }
+        val changed = session.dirty || session.externalChanged || session.error != null ||
+            pending.optLong("sourceModified") != session.entry.modified || pending.optLong("sourceSize") != session.entry.size
+        val location = JSONObject(pending.toString()).put("sourceChanged", changed)
+        location.remove("sourceModified")
+        location.remove("sourceSize")
+        if (changed) sessions.message = "Search coordinates describe an indexed original, not necessarily this buffer. Verify the highlighted source; your draft is retained."
+        evaluate("window.NotePit?.reveal($location)")
+        sessions.revealDelivered(session, pending)
+    }
     fun theme(dark: Boolean) {
         if (darkMode == dark) return
         darkMode = dark

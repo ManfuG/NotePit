@@ -1,4 +1,36 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#11141F" android:pathData="M0,0h108v108h-108z"/>
-    <path android:fillColor="@android:color/transparent" android:strokeColor="#B9C4FF" android:strokeWidth="4" android:strokeLineJoin="round" android:pathData="M54,35C47,29 36,28 25,31L25,73C36,70 47,71 54,77C61,71 72,70 83,73L83,31C72,28 61,29 54,35L54,77"/>
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Orbital geometry echoes the xPit suite; the open book is NotePit's core. -->
+    <path android:fillColor="#18264B"
+        android:pathData="M54,21A33,33 0,1 1,54,87A33,33 0,1 1,54,21" />
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-24">
+        <path android:fillColor="@android:color/transparent"
+            android:strokeColor="#91A8FF" android:strokeWidth="1.6"
+            android:pathData="M20,54A34,13 0,1 1,88,54A34,13 0,1 1,20,54" />
+        <path android:fillColor="@android:color/transparent"
+            android:strokeColor="#647EC8" android:strokeWidth="0.8"
+            android:pathData="M27,54A27,20 0,1 1,81,54A27,20 0,1 1,27,54" />
+    </group>
+    <path android:fillColor="#F2F4FF" android:strokeColor="#18264B"
+        android:strokeWidth="2" android:strokeLineJoin="round"
+        android:pathData="M54,38C48,34 41,33 34,35L34,69C41,67 48,68 54,73C60,68 67,67 74,69L74,35C67,33 60,34 54,38Z" />
+    <path android:fillColor="@android:color/transparent"
+        android:strokeColor="#3157D5" android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M54,39L54,68M40,43C43,43 46,44 49,45M40,50C43,50 46,51 49,52M59,45C62,44 65,43 68,43M59,52C62,51 65,50 68,50" />
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-24">
+        <path android:fillColor="@android:color/transparent"
+            android:strokeColor="#91A8FF" android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:pathData="M21,57C28,68 60,73 80,62" />
+    </group>
+    <path android:fillColor="#FF6C9E" android:strokeColor="#18264B"
+        android:strokeWidth="1.4"
+        android:pathData="M81,33A4.5,4.5 0,1 1,72,33A4.5,4.5 0,1 1,81,33" />
+    <path android:fillColor="#FF6C9E"
+        android:pathData="M29,68L30.5,71.5L34,73L30.5,74.5L29,78L27.5,74.5L24,73L27.5,71.5Z" />
 </vector>

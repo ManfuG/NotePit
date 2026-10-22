@@ -1,3 +1,13 @@
+export interface SearchLocation {
+  query: string;
+  page: number;
+  line: number;
+  endLine: number;
+  text: string;
+  semantic: boolean;
+  sourceChanged?: boolean;
+}
+
 export interface DocumentOptions {
   name: string;
   bytes?: Uint8Array;
@@ -17,4 +27,5 @@ export interface DocumentHandle {
   destroy(): void;
   getState(): unknown;
   command?(command: string): void;
+  reveal?(location: SearchLocation): void | Promise<void>;
 }

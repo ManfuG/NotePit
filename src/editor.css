@@ -121,3 +121,43 @@
 .text-editor .cm-search button {
   padding-inline: 8px;
 }
+
+.text-editor-reveal {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--editor-border);
+  background: var(--editor-surface);
+  font: 12px system-ui, sans-serif;
+}
+
+.text-editor-reveal span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.text-editor-reveal button {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--editor-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.text-editor .cm-revealed-match {
+  background: rgb(255 218 45 / 38%);
+  box-shadow: inset 0 -1px rgb(161 116 0 / 55%);
+}
+
+.text-editor .cm-revealed-match.cm-revealed-active {
+  background: rgb(255 181 35 / 58%);
+  outline: 1px solid rgb(173 110 0 / 75%);
+}
+
+.text-editor .cm-revealed-passage {
+  background: rgb(255 218 45 / 28%);
+}

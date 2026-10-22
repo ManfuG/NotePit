@@ -1,6 +1,6 @@
 import { openEditor } from './editor';
 import { openPdf } from './pdf';
-import type { DocumentHandle } from './document';
+import type { DocumentHandle, SearchLocation } from './document';
 import './style.css';
 
 interface EngineConfig {
@@ -22,6 +22,7 @@ interface EngineHost {
   acknowledge(purpose: string, sequence: number, success: boolean, error: string): void;
   command(command: string): void;
   setTheme(dark: boolean): void;
+  reveal(location: SearchLocation): void;
 }
 declare global {
   interface Window {
@@ -41,6 +42,7 @@ let draftScheduled = false;
 let draftTimer: number | undefined;
 let transfers: Promise<void> = Promise.resolve();
 const acknowledgements = new Map<string, TransferAck>();
+let pendingReveal: SearchLocation | undefined;
 
 function post(event: Record<string, unknown>) {
   window.NotePitNative?.postMessage(JSON.stringify(event));
@@ -118,6 +120,11 @@ window.NotePit = {
       if (!response.ok) throw new Error('The document is temporarily unavailable. Its recovery files are retained.');
       handle = await openEditor(host, { ...options, bytes: new Uint8Array(await response.arrayBuffer()) });
     }
+    if (pendingReveal) {
+      const location = pendingReveal;
+      pendingReveal = undefined;
+      try { await handle.reveal?.(location); } catch (error) { report(error); }
+    }
     post({ type: 'ready' });
     post({ type: 'dirty', dirty });
   },
@@ -138,6 +145,10 @@ window.NotePit = {
     ack?.resolve();
   },
   command(command) { handle?.command?.(command); },
+  reveal(location) {
+    if (!handle) { pendingReveal = location; return; }
+    try { Promise.resolve(handle.reveal?.(location)).catch(report); } catch (error) { report(error); }
+  },
   setTheme(dark) { theme(dark); config.dark = dark; handle?.command?.(`theme:${dark ? 'dark' : 'light'}`); },
 };
 

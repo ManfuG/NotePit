@@ -1,12 +1,14 @@
-# NotePit 0.2
+# NotePit 0.4
 
-Offline-first Android document manager. Native **Kotlin + Jetpack Compose / Material 3** UI and SAF storage; maintained **PDF.js** and **CodeMirror 6** document engines run in restricted, locally bundled WebViews. No Capacitor, account, proprietary sync protocol, AI or Anki integration.
+Offline-first Android document manager with global text search and optional, fully on-device hybrid semantic search. Native **Kotlin + Jetpack Compose / Material 3** UI and SAF storage; maintained **PDF.js** and **CodeMirror 6** document engines run in restricted, locally bundled WebViews. No account, cloud search, proprietary sync protocol or Anki integration.
 
-## Install on OnePlus 15
+The native launcher and startup splash share a cobalt/raspberry orbital notebook mark, using the xPit suite's orbital geometry. The splash follows Android's normal startup lifecycle: no blocking entry page or artificial display delay.
 
-1. Download [`app-release.apk`](https://github.com/ManfuG/NotePit/releases/latest/download/app-release.apk) from the latest GitHub release.
+## Install on Android
+
+1. Download **app-release.apk** from this repository's latest **Releases** page.
 2. Allow installation from the browser/file manager when Android asks, then install. Keep Android System WebView updated.
-3. Open **Connect folder**, select a subfolder such as `Documents/University`, and grant access. Repeat for additional folders. Android restricts storage roots, Download root and `Android/data`.
+3. Open **Connect folder**, select a subfolder such as `Documents/Notes`, and grant access. Repeat for additional folders. Android restricts storage roots, Download root and `Android/data`.
 4. Open documents, edit and explicitly **Save** to their original locations. Closing an edited document offers saving, retaining a draft or discarding changes.
 
 The signed release uses a persistent private signing key for subsequent updates. **The earlier GitHub debug prototype used a different key**: Android may require uninstalling that prototype once. Save/export all unsaved work first; uninstalling removes app-private drafts, preferences and SAF grants, not your original shared-storage documents. Reconnect folders afterward. Do not uninstall a release build merely to upgrade it.
@@ -20,6 +22,23 @@ The signed release uses a persistent private signing key for subsequent updates.
 - Favorites, recent documents, long-press multiselect, contextual menus and bottom actions.
 - Create, rename, copy, move and delete files/folders. Recursive transfers verify bytes and membership before removing a source; collisions and partial failures are reported, not silently overwritten.
 - Syncthing internal/temporary files are excluded from browsing/search; conflict copies remain visible.
+
+### Global search
+
+- **Text search (0.3):** search document contents across granted folders, not just filenames. A private SQLite FTS4 index ranks passages with BM25 and retains text line ranges or PDF page references.
+- **Hybrid semantic search (0.4):** optionally combine text ranking with local dense-vector similarity using reciprocal-rank fusion. Scores express relative relevance, not calibrated probabilities. Semantic results can be approximate, not literal query matches.
+- Results include source paths and snippets. Opening a result reveals its text range or PDF page; literal occurrences are highlighted, while approximate semantic passages are labeled. Next/previous controls move between revealed matches.
+- Foreground resumes and provider change notifications refresh the index incrementally, including externally synchronized files. **Refresh** explicitly rebuilds it when needed. Indexing reports progress and unreadable or unsupported documents instead of claiming incomplete extraction is complete.
+- Indexing is bounded: up to **16 MiB per text file**, **64 MiB and 2,000 pages per PDF**, and **25,000 passages per document**. Oversized, encrypted, extraction-restricted or image-only PDFs are reported as exclusions; there is no OCR. Queries are limited to **256 characters** and results to **100 hits**.
+- PDF indexing requires an extractable text layer. Search does not grant extra filesystem access, change originals, or replace explicit document saves. A refresh hashes source snapshots, so same-size/timestamp-preserving edits can still be detected; unchanged files are not re-extracted unless a rebuild is requested.
+
+#### Optional semantic model
+
+Text search needs no model download. Semantic search requires an **explicit, one-time HTTPS download** from `huggingface.co`; no document content or query is sent to that service. Pinned model assets are SHA-256 verified before installation. The download is approximately **17.7 MB**, and installation requires at least **64 MiB** of available app storage.
+
+After installation, embedding, vector indexing and hybrid search run **fully offline on the device** using ONNX Runtime. The model can be removed from the search settings without removing original documents. Derived passages and vectors stay in app-private storage; neither the index nor the model is written into connected folders. Removing the app removes its private data but not shared-storage originals.
+
+The English-trained model is **sentence-transformers/paraphrase-MiniLM-L3-v2** (Apache-2.0), with a quantized ONNX conversion by **Xenova**, pinned to revision `4b544e74dfc3256b2b56849ea5d7064fee1ac846`. Semantic retrieval can miss relevant passages or return irrelevant ones; multilingual quality is not guaranteed. See the [source model card](https://huggingface.co/sentence-transformers/paraphrase-MiniLM-L3-v2) and [conversion](https://huggingface.co/Xenova/paraphrase-MiniLM-L3-v2). Runtime and model attribution is bundled in `public/THIRD_PARTY_NOTICES.txt`.
 
 ### PDFs
 
@@ -43,8 +62,8 @@ Syncthing performs synchronization independently. NotePit neither downloads/impo
 
 1. **Computer:** install [official Syncthing](https://syncthing.net/downloads/) for Linux or Windows. Start it and open its local Web GUI, normally `http://127.0.0.1:8384`. On Linux, a distribution-provided user service can be enabled with `systemctl --user enable --now syncthing.service`; on Windows, run the downloaded executable and keep it running.
 2. **Phone:** install the maintained [researchxxl Syncthing-Fork](https://github.com/researchxxl/syncthing-android/releases), package `com.github.catfriend1.syncthingfork`. Complete its onboarding and storage permission setup. Other Play forks and the discontinued official wrapper are not assumed equivalent.
-3. **Pair:** initially put both devices on the same network. Add the other device's Device ID on each side and accept pairing. Share the computer notes folder with the phone; accept it in the Fork, using an ordinary phone directory such as `Documents/University`. Use the same **Folder ID** and **Send & Receive** on both devices.
-4. **Protect:** configure receiving-side file versioning in Syncthing and keep independent backups. In OnePlus app information/battery controls, allow the Fork's background operation if desired; wording varies with OxygenOS. Review the Fork's run conditions. Background exemptions can increase battery consumption.
+3. **Pair:** initially put both devices on the same network. Add the other device's Device ID on each side and accept pairing. Share the computer notes folder with the phone; accept it in the Fork, using an ordinary phone directory such as `Documents/Notes`. Use the same **Folder ID** and **Send & Receive** on both devices.
+4. **Protect:** configure receiving-side file versioning in Syncthing and keep independent backups. In Android's app information/battery controls, allow the Fork's background operation if desired; wording and availability vary by device. Review the Fork's run conditions. Background exemptions can increase battery consumption.
 5. **NotePit:** open **Folder actions → Sync**, follow the four-step guide and select the exact same phone directory through SAF. Associate each granted directory with its Syncthing Folder ID after checking both apps. This is your confirmation, not automatic path verification.
 6. **Check:** create a disposable text file on the computer and verify it reaches the phone. Edit/save it in NotePit and verify the computer receives it. Then test an offline edit and reconnection before relying on the setup.
 
@@ -96,12 +115,41 @@ Signed APK: `android/app/build/outputs/apk/release/app-release.apk`. The first e
 
 Builds provision the pinned official PDF.js 6.4.299 legacy distribution with its published SHA-256, local worker/fonts/CMaps/WASM, and offline math assets. A guarded FreeText snapshot patch keeps Android's keyboard/caret intact during drafts; builds reject an unexpected upstream implementation. Third-party notices are generated from locked runtime dependencies. GitHub Actions builds APKs, runs editor tests and invokes the JVM test task; device instrumentation was run locally, not claimed as CI emulator coverage.
 
-### Exercised verification
+### Verification scope
 
-- **12 Node tests:** encoding/BOM, mixed newline edits/undo/redo, inferred indentation, malformed journals and replay.
-- **26 Android instrumentation tests:** real resolver/provider streams via an isolated test provider, transfer integrity/collisions/cancellation/partial failures, save conflicts/restoration/recovery, metadata/permissions/cache behavior, loopback authentication, encrypted credentials, service identity and status parsing.
-- **Running API 36 emulator:** real SAF authorization, code edit/save to original bytes, persistent grant and unsaved-text recovery after force-stop/restart, native multi-document UI. PDF single/multiline typing survived idle native drafts with zero focus losses; the complete saved annotation was independently parsed from the original shared-storage PDF.
-- **Browser document engines:** sanitized Markdown/math preview; 120-page PDF on-demand rendering, crop navigation and reading-state/bookmark restoration; five-entry PDF outline. A crop-induced page-jump regression was reproduced and fixed.
-- **Two isolated real Syncthing 2.1.7 engines:** verified A→B transfer, B→A reconciliation after pausing/reconnecting peers, and preservation of both concurrent edits as conflict copies.
+The repository includes editor invariants and Android resolver/provider, transfer, save-recovery and loopback synchronization tests. The commands above are the reproducible entry points; a successful build alone does not establish document correctness, physical-device performance or sync convergence.
 
-No physical OnePlus 15 benchmark, OxygenOS background-policy test, Windows↔OnePlus transfer or installed Syncthing-Fork pairing is claimed as verified. Those remain device-specific setup checks, not simulated successes.
+For release verification, use real SAF grants and original-file saves, reopen indexed text/PDF search results, exercise next/previous highlights, and repeat semantic search with networking disabled after an explicitly approved model download. Also check interrupted indexing, unavailable folders, model removal and document editing/PDF annotations alongside search.
+
+Device-specific battery policies, desktop-to-phone transfer and the installed Syncthing-Fork pairing must be checked on the intended setup. No physical-device benchmark or universal background-operation guarantee is claimed.
+
+### Measured search checks
+
+API 36 x86_64 emulator; synthetic fixtures, not physical-phone or general retrieval-quality guarantees. Keyword timings include native retrieval and provider validation, exclude the UI's 300 ms typing debounce, and use no embedding model.
+
+| Check | Observed result |
+| --- | --- |
+| Keyword corpus | 100 documents, 1,091 passages, 292,300 source bytes |
+| Keyword index | 1,736,704 bytes (1.66 MiB) |
+| Initial indexing / one-edit refresh | 627.5 ms / 213.4 ms |
+| Keyword query median / p95 | 33.9 ms / 37.3 ms |
+| Literal source retrieval | 100/100 deterministic queries |
+| Offline embedding cold / warm median | 247.6 ms / 27.0 ms |
+| Semantic question retrieval | 4/4 non-identical questions chose the intended passage |
+| Semantic-test process PSS before / after inference | 161.6 MiB / 215.8 MiB; increase 54.2 MiB |
+
+The semantic check ran with Wi-Fi and mobile data disabled after explicit model installation. Its four questions are a smoke check, not an estimated real-world accuracy rate. Process PSS includes the Android test runtime and shared mappings; it is not a model-only allocation or a peak-memory measurement.
+
+Verification includes 12 editor invariants, 10 tokenizer unit tests, 20 SAF/storage tests, 11 native index tests, 7 loopback sync tests and the opt-in real-model smoke. The index tests cover timestamp-preserving external changes, removal/disconnection, encoding and coordinates, exclusions, BM25 ordering, and queries during a blocked refresh.
+
+To repeat the real-model smoke after installing the model through the app and disabling device networking:
+
+```sh
+adb shell am instrument -w -r \
+  -e class io.notepit.app.SemanticEngineSmokeTest -e semanticSmoke true \
+  io.notepit.app.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+### Repository privacy
+
+Current project examples and documentation use generic identities; third-party attribution is retained. The audit found no probable committed live credentials or private signing keys. Four pre-existing commits retain personal author/committer metadata and older documentation references. No published history was rewritten: removing that exposure requires a separately coordinated history cleanup, including existing clones and cached artifacts. Use privacy-safe author/committer settings for future commits.

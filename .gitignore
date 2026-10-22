@@ -1,6 +1,7 @@
 node_modules/
 dist/
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/**/build/
 android/.idea/

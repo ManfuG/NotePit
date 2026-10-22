@@ -204,6 +204,16 @@ class DocumentsRepositoryTest {
         assertTrue(provider.contains(bad.id))
     }
 
+    @Test fun boundedSnapshotRejectsOversizeStreamsWithoutReplacingPreviousSnapshot(): Unit = runBlocking {
+        val original = provider.add("root", "bounded.txt", "text/plain", ByteArray(70_000) { 65 })
+        val target = File(context.filesDir, "bounded-snapshot").apply { writeText("retained snapshot") }
+        expect<IOException> { repository.snapshot(entry(original), target, 65_536) }
+        assertEquals("retained snapshot", target.readText())
+        assertFalse(target.parentFile!!.listFiles()!!.any { it.name.startsWith(".snapshot-") })
+        assertEquals(hash(original.file.readBytes()), repository.snapshot(entry(original), target, 70_000))
+        assertArrayEquals(original.file.readBytes(), target.readBytes())
+    }
+
     @Test fun snapshotAndSaveCommitExactHashesAndRefuseExternalChanges(): Unit = runBlocking {
         val original = provider.add("root", "note.txt", "text/plain", "original".toByteArray())
         val snapshot = File(context.filesDir, "snapshot.bin")

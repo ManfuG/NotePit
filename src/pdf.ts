@@ -1,5 +1,6 @@
-import type { DocumentHandle, DocumentOptions } from './document';
+import type { DocumentHandle, DocumentOptions, SearchLocation } from './document';
 import './pdf.css';
+import pdfStylesUrl from './pdf.css?url&no-inline';
 
 type Bounds = [number, number, number, number];
 interface Viewport {
@@ -12,10 +13,12 @@ interface PdfPage {
   view: number[];
   getViewport(options: { scale: number; rotation?: number }): Viewport;
   render(options: { canvasContext: CanvasRenderingContext2D; canvas: HTMLCanvasElement; viewport: Viewport; annotationMode: number; background: string }): RenderTask;
+  getTextContent(options: { disableNormalization: boolean }): Promise<{ items: { str?: string }[] }>;
 }
 interface PageView {
   id: number; div: HTMLDivElement; pdfPage: PdfPage | null; viewport: Viewport;
   width: number; height: number;
+  textLayer?: { div: HTMLDivElement; highlighter?: { textDivs: HTMLElement[] | null; textContentItemsStr: string[] | null } | null } | null;
 }
 interface EditorManager {
   endCurrentEditing(): void;
@@ -44,6 +47,7 @@ interface ViewerApplication {
   initialRotation: number;
   eventBus: {
     on<T>(name: string, callback: (event: T) => void, options: { signal: AbortSignal }): void;
+    dispatch(name: string, event: Record<string, unknown>): void;
   };
   pdfViewer: {
     firstPagePromise: Promise<unknown>;
@@ -61,6 +65,12 @@ interface ViewerApplication {
   pdfLinkService: { externalLinkEnabled: boolean; setHash(hash: string): void };
   viewsManager: { switchView(view: number, forceOpen?: boolean): void } | null;
   findBar: { open(): void };
+  findController: {
+    selected: { pageIdx: number; matchIdx: number };
+    pageMatches: number[][];
+    pageMatchesLength: number[][];
+    state: { query: string } | null;
+  };
   open(options: { data?: Uint8Array; url?: string; filename: string }): Promise<void>;
   close(): Promise<void>;
 }
@@ -85,6 +95,22 @@ function readingState(value: unknown): ReadingState {
     crop: state.crop === true,
     bookmarks: Array.isArray(state.bookmarks) ? [...new Set(state.bookmarks.filter(page => Number.isInteger(page) && page > 0))].sort((a, b) => a - b) : [],
   };
+}
+
+// Preserve UTF-16 offsets while comparing PDFBox passages with PDF.js text.
+// Whitespace/layout differences and compatibility ligatures are not new text.
+function normalizedSource(text: string): { text: string; starts: number[]; ends: number[] } {
+  let normalized = '';
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let offset = 0;
+  for (const character of text) {
+    const folded = character.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[\s\u00ad]/gu, '');
+    normalized += folded;
+    for (let index = 0; index < folded.length; index++) { starts.push(offset); ends.push(offset + character.length); }
+    offset += character.length;
+  }
+  return { text: normalized, starts, ends };
 }
 
 /** The official, offline generic viewer owns rendering, selection and annotations. */
@@ -218,6 +244,249 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
     state.bookmarks = state.bookmarks.filter(page => page <= pdfDocument.numPages);
     const inner = frame.contentDocument!;
     const pdfViewer = viewer.pdfViewer;
+
+    const searchStyle = inner.createElement('link');
+    searchStyle.rel = 'stylesheet';
+    searchStyle.href = new URL(pdfStylesUrl, document.baseURI).href;
+    inner.head.append(searchStyle);
+    const searchTools = inner.createElement('div');
+    searchTools.className = 'notepit-search-tools';
+    searchTools.hidden = true;
+    searchTools.setAttribute('role', 'region');
+    searchTools.setAttribute('aria-label', 'Search result');
+    const searchLabel = inner.createElement('span');
+    searchLabel.setAttribute('role', 'status');
+    searchTools.append(searchLabel);
+    inner.body.append(searchTools);
+    let searchLocation: SearchLocation | undefined;
+    let searchRequest: AbortController | undefined;
+    let searchEpoch = 0;
+    let passageFrame: number | undefined;
+    let passageTimer: number | undefined;
+    let exactVerified = false;
+    let passage: { page: number; from: number; to: number } | undefined;
+    const clearPassage = () => {
+      inner.querySelectorAll('.notepit-search-rectangle').forEach(rectangle => rectangle.remove());
+    };
+    const closeSearch = () => {
+      searchEpoch++;
+      searchRequest?.abort();
+      clearTimeout(passageTimer);
+      exactVerified = false;
+      searchLocation = undefined;
+      passage = undefined;
+      clearPassage();
+      searchTools.hidden = true;
+      viewer.eventBus.dispatch('findbarclose', { source: window });
+    };
+    cleanups.push(() => {
+      closeSearch();
+      window.cancelAnimationFrame(passageFrame ?? 0);
+      searchTools.remove();
+      searchStyle.remove();
+    });
+    const searchButton = (label: string, action: () => void) => {
+      const control = inner.createElement('button');
+      control.type = 'button';
+      control.textContent = label;
+      control.addEventListener('click', action, { signal: events.signal });
+      searchTools.append(control);
+      return control;
+    };
+    const find = (query: string, previous: boolean, signal: AbortSignal): Promise<void> => {
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      const listeners = new AbortController();
+      const timer = window.setTimeout(() => finish(new Error('PDF text search did not finish.')), 30_000);
+      const aborted = () => finish(new DOMException('Search superseded', 'AbortError'));
+      function finish(error?: Error) {
+        clearTimeout(timer);
+        listeners.abort();
+        signal.removeEventListener('abort', aborted);
+        if (error) reject(error); else resolve();
+      }
+      signal.addEventListener('abort', aborted, { once: true });
+      viewer.eventBus.on('updatefindcontrolstate', ({ state: findState }: { state: number }) => {
+        if (findState !== 3) finish();
+      }, { signal: listeners.signal });
+      if (signal.aborted) { aborted(); return promise; }
+      viewer.eventBus.dispatch('find', {
+        source: window, type: 'again', query, phraseSearch: true, caseSensitive: false,
+        entireWord: false, highlightAll: true, findPrevious: previous, matchDiacritics: true,
+      });
+      return promise;
+    };
+    const refreshSearchLabel = () => {
+      if (!searchLocation || searchLocation.semantic || !exactVerified) return;
+      const { pageIdx, matchIdx } = viewer.findController.selected;
+      if (pageIdx >= 0 && matchIdx >= 0) searchLabel.textContent = `Exact text · page ${pageIdx + 1} · match ${matchIdx + 1} of ${viewer.findController.pageMatches[pageIdx]?.length ?? 0}`;
+    };
+    const step = async (previous: boolean) => {
+      if (!searchLocation || searchLocation.semantic || !searchRequest) return;
+      try {
+        previousMatch.disabled = nextMatch.disabled = true;
+        await find(searchLocation.query, previous, searchRequest.signal);
+        if (!searchRequest.signal.aborted && exactVerified) previousMatch.disabled = nextMatch.disabled = false;
+        refreshSearchLabel();
+      } catch (error) {
+        if (!searchRequest?.signal.aborted) searchLabel.textContent = error instanceof Error ? error.message : String(error);
+      }
+    };
+    const previousMatch = searchButton('Previous', () => { void step(true); });
+    const nextMatch = searchButton('Next', () => { void step(false); });
+    searchButton('Close', closeSearch);
+
+    const drawPassage = (scroll: boolean) => {
+      clearPassage();
+      if (!passage) return false;
+      const view = pdfViewer.getPageView(passage.page - 1);
+      const mapping = view?.textLayer?.highlighter;
+      const textDivs = mapping?.textDivs;
+      const textContentItemsStr = mapping?.textContentItemsStr;
+      // PDF.js creates the highlighter before its text mapping and appends the
+      // layer only after rendering. A cold page must wait for textlayerrendered.
+      if (!view || !textDivs?.length || !textContentItemsStr ||
+          textDivs.length !== textContentItemsStr.length ||
+          !view.textLayer?.div.isConnected || view.textLayer.div.hidden) return false;
+      let offset = 0;
+      const pageRect = view.div.getBoundingClientRect();
+      const scaleX = pageRect.width / view.div.offsetWidth;
+      const scaleY = pageRect.height / view.div.offsetHeight;
+      let first: HTMLElement | undefined;
+      for (let index = 0; index < textDivs.length; index++) {
+        const text = textContentItemsStr[index];
+        const start = Math.max(0, passage.from - offset);
+        const end = Math.min(text.length, passage.to - offset);
+        offset += text.length;
+        if (end <= start) continue;
+        const walker = inner.createTreeWalker(textDivs[index], 4 /* SHOW_TEXT */);
+        let position = 0;
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          const length = node.textContent?.length ?? 0;
+          const from = Math.max(0, start - position);
+          const to = Math.min(length, end - position);
+          position += length;
+          if (to <= from) continue;
+          const range = inner.createRange();
+          range.setStart(node, from);
+          range.setEnd(node, to);
+          for (const rect of range.getClientRects()) {
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            const rectangle = inner.createElement('div');
+            rectangle.className = 'notepit-search-rectangle';
+            rectangle.style.left = `${(rect.left - pageRect.left) / scaleX - view.div.clientLeft}px`;
+            rectangle.style.top = `${(rect.top - pageRect.top) / scaleY - view.div.clientTop}px`;
+            rectangle.style.width = `${rect.width / scaleX}px`;
+            rectangle.style.height = `${rect.height / scaleY}px`;
+            view.div.append(rectangle);
+            first ??= rectangle;
+          }
+        }
+      }
+      if (scroll && first) first.scrollIntoView({ block: 'center', inline: 'nearest' });
+      if (first) {
+        clearTimeout(passageTimer);
+        searchLabel.textContent = `Related source passage · page ${passage.page} · not a literal query match`;
+      }
+      return !!first;
+    };
+    const schedulePassage = () => {
+      if (!passage || passageFrame !== undefined) return;
+      passageFrame = window.requestAnimationFrame(() => {
+        passageFrame = undefined;
+        if (!destroyed) drawPassage(false);
+      });
+    };
+    viewer.eventBus.on('textlayerrendered', ({ pageNumber }: { pageNumber: number }) => {
+      if (passage?.page === pageNumber) {
+        if (!drawPassage(true)) searchLabel.textContent = 'Related result · the source passage could not be mapped to visible PDF text';
+      }
+    }, { signal: events.signal });
+    for (const event of ['scalechanging', 'rotationchanging', 'updateviewarea']) viewer.eventBus.on(event, schedulePassage, { signal: events.signal });
+    viewer.eventBus.on('updatefindcontrolstate', ({ state: findState }: { state: number }) => {
+      if (findState !== 3 && !passage) refreshSearchLabel();
+    }, { signal: events.signal });
+
+    const reveal = async (location: SearchLocation) => {
+      closeSearch();
+      if (destroyed) return;
+      const epoch = searchEpoch;
+      const request = new AbortController();
+      searchRequest = request;
+      searchLocation = location;
+      searchTools.hidden = false;
+      previousMatch.disabled = nextMatch.disabled = true;
+      searchLabel.textContent = location.semantic ? 'Locating related source passage…' : 'Locating exact text…';
+      if (!Number.isInteger(location.page) || location.page < 1 || location.page > pdfDocument.numPages) {
+        searchLabel.textContent = 'Search result changed · the indexed PDF page is no longer available';
+        return;
+      }
+      const page = location.page;
+      pdfViewer.scrollPageIntoView({ pageNumber: page });
+      try {
+        const sourcePage = await pdfDocument.getPage(page);
+        const content = await sourcePage.getTextContent({ disableNormalization: true });
+        if (destroyed || epoch !== searchEpoch) return;
+        const raw = content.items.map(item => item.str ?? '').join('');
+        const normalized = normalizedSource(raw);
+        const needle = normalizedSource(location.text).text;
+        const offset = needle ? normalized.text.indexOf(needle) : -1;
+        if (offset < 0 || normalized.text.indexOf(needle, offset + 1) >= 0) {
+          searchLabel.textContent = `${location.semantic ? 'Related' : 'Indexed'} result · the source passage could not be uniquely verified on page ${page}`;
+          return;
+        }
+        const from = normalized.starts[offset];
+        const to = normalized.ends[offset + needle.length - 1];
+        if (location.semantic) {
+          passage = { page, from, to };
+          searchLabel.textContent = `Related result · page ${page} · waiting for the source text layer…`;
+          passageTimer = window.setTimeout(() => {
+            if (epoch === searchEpoch && passage) searchLabel.textContent = 'Related result · the source passage could not be mapped to visible PDF text';
+          }, 15_000);
+          // Text may not be rendered yet; textlayerrendered completes this mapping.
+          const layer = pdfViewer.getPageView(page - 1)?.textLayer;
+          if (!drawPassage(true) && layer?.div.isConnected && !layer.div.hidden &&
+              layer.highlighter?.textDivs?.length && layer.highlighter.textContentItemsStr) {
+            searchLabel.textContent = 'Related result · the source passage could not be mapped to visible PDF text';
+          }
+          return;
+        }
+        // Reset through official events so even an unchanged query starts on the
+        // requested page, never on the previous global selected occurrence.
+        await find('', false, request.signal);
+        if (epoch !== searchEpoch) return;
+        pdfViewer.currentPageNumber = page;
+        await find(location.query, false, request.signal);
+        if (epoch !== searchEpoch) return;
+        const matches = viewer.findController.pageMatches[page - 1] ?? [];
+        const lengths = viewer.findController.pageMatchesLength[page - 1] ?? [];
+        const target = matches.findIndex((start, index) => start >= from && start + lengths[index] <= to);
+        if (target < 0) {
+          viewer.eventBus.dispatch('findbarclose', { source: window });
+          searchLabel.textContent = `Indexed result · no literal query match could be verified in the source passage on page ${page}`;
+          return;
+        }
+        // The fresh controller starts at this page's first match. Advance using
+        // its own selection/scroll logic; never rewrite its private offsets.
+        for (let count = 0; count <= matches.length; count++) {
+          const selected = viewer.findController.selected;
+          if (selected.pageIdx === page - 1 && selected.matchIdx === target) break;
+          await find(location.query, false, request.signal);
+          if (epoch !== searchEpoch) return;
+        }
+        const selected = viewer.findController.selected;
+        if (selected.pageIdx !== page - 1 || selected.matchIdx !== target) throw new Error('The verified PDF occurrence could not be selected.');
+        exactVerified = true;
+        previousMatch.disabled = nextMatch.disabled = false;
+        refreshSearchLabel();
+      } catch (error) {
+        if (request.signal.aborted || epoch !== searchEpoch) return;
+        passage = undefined;
+        clearPassage();
+        viewer.eventBus.dispatch('findbarclose', { source: window });
+        searchLabel.textContent = error instanceof Error ? error.message : String(error);
+      }
+    };
 
     // Storage's onSetModified is edge-triggered, not an edit counter. Observe
     // actual writes and editor commands as well, so edits after a draft/save are
@@ -552,6 +821,7 @@ export async function openPdf(host: HTMLElement, options: DocumentOptions): Prom
         options.onDirty(!options.readOnly && generation !== serializedGeneration);
       },
       getState,
+      reveal,
       command(command) {
         if (destroyed) return;
         switch (command) {

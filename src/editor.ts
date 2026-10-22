@@ -1,7 +1,8 @@
 import { basicSetup } from 'codemirror';
-import { Compartment, EditorSelection, EditorState } from '@codemirror/state';
+import { Compartment, EditorSelection, EditorState, StateEffect, StateField } from '@codemirror/state';
 import type { Extension } from '@codemirror/state';
-import { EditorView, keymap } from '@codemirror/view';
+import { Decoration, EditorView, keymap } from '@codemirror/view';
+import type { DecorationSet } from '@codemirror/view';
 import { HighlightStyle, StreamLanguage, indentUnit, syntaxHighlighting } from '@codemirror/language';
 import type { Language } from '@codemirror/language';
 import { indentLess, indentMore, indentWithTab, redo, redoDepth, selectAll, toggleComment, undo, undoDepth } from '@codemirror/commands';
@@ -28,6 +29,46 @@ import './editor.css';
 type LanguageKind = 'text' | 'python' | 'r' | 'cpp' | 'latex' | 'markdown' | 'javascript' | 'typescript' | 'html' | 'css' | 'json' | 'yaml' | 'bash';
 type ViewState = { version: 1; selection: unknown; scrollTop: number; scrollLeft: number; preview: boolean; previewScrollTop: number };
 type TouchAction = { label: string; before: string; after?: string; title?: string; cursor?: number };
+
+type SearchRange = { from: number; to: number };
+type RevealedSearch = { query: string; semantic: boolean; ranges: SearchRange[]; active: number; message?: string };
+const revealSearch = StateEffect.define<RevealedSearch | null>();
+const activateSearch = StateEffect.define<number>();
+
+function literalRanges(text: string, query: string): SearchRange[] {
+  if (!query) return [];
+  const expression = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
+  return Array.from(text.matchAll(expression), match => ({ from: match.index!, to: match.index! + match[0].length }));
+}
+
+function searchDecorations(search: RevealedSearch | null): DecorationSet {
+  return Decoration.set(search?.ranges.filter(range => range.to > range.from).map((range, index) => Decoration.mark({
+    class: `cm-revealed-match${search.semantic ? ' cm-revealed-passage' : ''}${index === search.active ? ' cm-revealed-active' : ''}`,
+  }).range(range.from, range.to)) ?? [], true);
+}
+
+// View-only effects never enter history or the byte/newline journal.
+const revealedSearchField = StateField.define<{ search: RevealedSearch | null; decorations: DecorationSet }>({
+  create: () => ({ search: null, decorations: Decoration.none }),
+  update(value, transaction) {
+    let search = value.search;
+    if (search && transaction.docChanged) {
+      const anchor = transaction.changes.mapPos(search.ranges[search.active]?.from ?? 0);
+      const ranges = search.semantic
+        ? search.ranges.map(range => ({ from: transaction.changes.mapPos(range.from, 1), to: transaction.changes.mapPos(range.to, -1) })).filter(range => range.to >= range.from)
+        : literalRanges(transaction.newDoc.toString(), search.query);
+      let active = ranges.findIndex(range => range.from >= anchor);
+      if (active < 0) active = Math.max(0, ranges.length - 1);
+      search = { ...search, ranges, active };
+    }
+    for (const effect of transaction.effects) {
+      if (effect.is(revealSearch)) search = effect.value;
+      if (effect.is(activateSearch) && search) search = { ...search, active: effect.value };
+    }
+    return search === value.search ? value : { search, decorations: searchDecorations(search) };
+  },
+  provide: field => EditorView.decorations.from(field, value => value.decorations),
+});
 
 function languageKind(name: string): LanguageKind {
   const extension = name.toLowerCase().split('.').pop()!;
@@ -184,6 +225,42 @@ export async function openEditor(host: HTMLElement, options: DocumentOptions): P
   toolbar.setAttribute('aria-label', 'Editor tools');
   pane.append(surface, toolbar);
 
+  const searchBar = document.createElement('div');
+  searchBar.className = 'text-editor-reveal';
+  searchBar.hidden = true;
+  searchBar.setAttribute('role', 'region');
+  searchBar.setAttribute('aria-label', 'Search result');
+  const searchLabel = document.createElement('span');
+  searchLabel.setAttribute('role', 'status');
+  searchBar.append(searchLabel);
+  const searchButton = (label: string, action: () => void) => {
+    const control = document.createElement('button');
+    control.type = 'button';
+    control.textContent = label;
+    control.addEventListener('click', action);
+    searchBar.append(control);
+    return control;
+  };
+  const activate = (index: number) => {
+    const search = view.state.field(revealedSearchField).search;
+    if (!search?.ranges.length) return;
+    const active = (index + search.ranges.length) % search.ranges.length;
+    view.dispatch({ effects: [activateSearch.of(active), EditorView.scrollIntoView(search.ranges[active].from, { y: 'center' })] });
+  };
+  const previousMatch = searchButton('Previous', () => activate((view.state.field(revealedSearchField).search?.active ?? 0) - 1));
+  const nextMatch = searchButton('Next', () => activate((view.state.field(revealedSearchField).search?.active ?? 0) + 1));
+  searchButton('Close', () => view.dispatch({ effects: revealSearch.of(null) }));
+  pane.prepend(searchBar);
+  const updateSearchBar = () => {
+    const search = view.state.field(revealedSearchField).search;
+    searchBar.hidden = !search;
+    if (!search) return;
+    searchLabel.textContent = search.message ?? (search.semantic
+      ? 'Related passage · not a literal query match'
+      : search.ranges.length ? `Exact text · ${search.active + 1} of ${search.ranges.length}` : 'No literal matches in the current document');
+    previousMatch.disabled = nextMatch.disabled = search.semantic || !search.ranges.length;
+  };
+
   const getState = (): ViewState => {
     if (previewVisible) previewScrollTop = preview.scrollTop;
     else {
@@ -308,6 +385,7 @@ export async function openEditor(host: HTMLElement, options: DocumentOptions): P
       languageExtension(kind, options.name),
       endingsField,
       endingsHistory(endingsField),
+      revealedSearchField,
       indentUnit.of(indentation.unit),
       EditorState.tabSize.of(indentation.size),
       keymap.of([indentWithTab]),
@@ -316,6 +394,7 @@ export async function openEditor(host: HTMLElement, options: DocumentOptions): P
       EditorView.editable.of(!options.readOnly),
       EditorView.contentAttributes.of({ 'aria-label': options.name, spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off' }),
       EditorView.updateListener.of(update => {
+        if (update.startState.field(revealedSearchField) !== update.state.field(revealedSearchField)) updateSearchBar();
         if (update.docChanged) {
           for (const transaction of update.transactions) {
             if (transaction.docChanged) options.onJournal?.(journalEntry(transaction, endingsField));
@@ -384,6 +463,40 @@ export async function openEditor(host: HTMLElement, options: DocumentOptions): P
     },
     getState,
     command: runCommand,
+    reveal(location) {
+      if (destroyed) return;
+      window.cancelAnimationFrame(restoreFrame);
+      setPreview(false);
+      const doc = view.state.doc;
+      if (!Number.isInteger(location.line) || location.line < 1 || location.line > doc.lines ||
+          !Number.isInteger(location.endLine) || location.endLine < location.line || location.endLine > doc.lines) {
+        view.dispatch({ effects: revealSearch.of({ query: location.query, semantic: location.semantic, ranges: [], active: 0,
+          message: 'Search result changed · the indexed source lines are no longer available' }) });
+        return;
+      }
+      const line = location.line;
+      const endLine = location.endLine;
+      const from = doc.line(line).from;
+      const to = doc.line(endLine).to;
+      const source = doc.sliceString(from, to);
+      const passageOffset = location.text ? source.indexOf(location.text.replace(/\r\n?/g, '\n')) : -1;
+      let search: RevealedSearch;
+      if (location.semantic) {
+        search = passageOffset < 0
+          ? { query: location.query, semantic: true, ranges: [], active: 0, message: 'Related result · source passage changed or could not be located' }
+          : { query: location.query, semantic: true, ranges: [{ from: from + passageOffset, to: from + passageOffset + location.text.replace(/\r\n?/g, '\n').length }], active: 0 };
+      } else {
+        const ranges = literalRanges(doc.toString(), location.query);
+        const passageFrom = passageOffset < 0 ? from : from + passageOffset;
+        const passageTo = passageOffset < 0 ? to : passageFrom + location.text.replace(/\r\n?/g, '\n').length;
+        const active = ranges.findIndex(range => range.from >= passageFrom && range.to <= passageTo);
+        const verified = passageOffset >= 0 && active >= 0;
+        search = { query: location.query, semantic: false, ranges: verified ? ranges : [], active: Math.max(0, active),
+          ...(!verified ? { message: 'Search result changed · the indexed passage and literal match could not be verified' } : {}) };
+      }
+      view.dispatch({ effects: [revealSearch.of(search), EditorView.scrollIntoView(search.ranges[search.active]?.from ?? from, { y: 'center' })] });
+      updateSearchBar();
+    },
     destroy() {
       if (destroyed) return;
       options.onState(getState());

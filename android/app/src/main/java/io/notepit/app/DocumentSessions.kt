@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
@@ -14,6 +15,11 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import java.io.Closeable
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -30,6 +36,7 @@ class OpenDocument(val id: String, var entry: DocumentEntry, val directory: File
     var error by mutableStateOf<String?>(null)
     var externalChanged by mutableStateOf(false)
     var reload by mutableStateOf(0)
+    var pendingReveal by mutableStateOf<JSONObject?>(null)
     var state: Any = JSONObject()
     var sequence = 0L
     var draftSequence = 0L
@@ -37,8 +44,34 @@ class OpenDocument(val id: String, var entry: DocumentEntry, val directory: File
 }
 
 /** Document buffers and reading state live independently of activities and renderer lifetimes. */
-class DocumentSessions(application: Application) : AndroidViewModel(application) {
+class DocumentSessions(application: Application, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
     val repository = DocumentsRepository(application)
+    val semanticEngine = SemanticEngine(application)
+    val searchIndex = SearchIndex(repository, semanticEngine)
+    var searchVisible by mutableStateOf(savedState.get<Boolean>("searchVisible") ?: false)
+        private set
+    var searchQuery by mutableStateOf(savedState.get<String>("searchQuery") ?: "")
+        private set
+    var semanticSearch by mutableStateOf(savedState.get<Boolean>("semanticSearch") ?: false)
+        private set
+    var searchHits by mutableStateOf<List<SearchHit>>(emptyList())
+        private set
+    var searching by mutableStateOf(false)
+        private set
+    var searchError by mutableStateOf<String?>(null)
+        private set
+    var selectedHit by mutableStateOf(savedState.get<Int>("selectedHit") ?: -1)
+        private set
+    private var foreground = false
+    private var refreshJob: Job? = null
+    private var queryJob: Job? = null
+    private var modelJob: Job? = null
+    private var providerObserver: Closeable? = null
+    private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
+    private var forceRefresh = false
+    private var queryVersion = 0L
+    var downloadingSearchModel by mutableStateOf(false)
+        private set
     val documents = mutableStateListOf<OpenDocument>()
     var activeId by mutableStateOf<String?>(null)
         private set
@@ -54,6 +87,16 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
     private val index get() = File(directory, "open.json")
 
     init {
+        viewModelScope.launch {
+            var installed = false
+            semanticEngine.status.collect { state ->
+                if (state.installed != installed) {
+                    installed = state.installed
+                    refreshSearch()
+                    runSearch()
+                }
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             directory.mkdirs()
             val savedTheme = application.getSharedPreferences("appearance", 0).getString("mode", "system") ?: "system"
@@ -74,7 +117,15 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
             } catch (error: Exception) {
                 withContext(Dispatchers.Main) { message = "Session recovery failed. Original recovery files remain in app storage. ${error.message}" }
             } finally {
-                withContext(Dispatchers.Main) { initialized = true }
+                withContext(Dispatchers.Main) {
+                    initialized = true
+                    savedState.get<String>("pendingSearchOpen")?.let { pending ->
+                        try {
+                            val request = JSONObject(pending)
+                            open(DocumentEntry.fromJson(request.getJSONObject("entry")), request.getJSONObject("reveal"))
+                        } catch (error: Exception) { message = "The saved search location could not be restored: ${error.message}" }
+                    }
+                }
             }
             for (operation in queue) {
                 try { operation() }
@@ -89,6 +140,7 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
         return OpenDocument(folder.name, DocumentEntry.fromJson(saved.getJSONObject("entry")), folder, saved.getString("revision")).also {
             it.dirty = saved.optBoolean("dirty")
             it.state = saved.opt("state") ?: JSONObject()
+            it.pendingReveal = saved.optJSONObject("pendingReveal")
             it.sequence = saved.optLong("sequence")
             it.draftSequence = saved.optLong("draftSequence")
             if (it.journal.exists()) it.journal.forEachLine { line ->
@@ -111,7 +163,7 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
     private fun persist(session: OpenDocument) {
         atomic(session.metadata, JSONObject().put("entry", session.entry.toJson()).put("revision", session.revision)
             .put("dirty", session.dirty).put("state", session.state).put("sequence", session.sequence)
-            .put("draftSequence", session.draftSequence).toString().toByteArray())
+            .put("draftSequence", session.draftSequence).put("pendingReveal", session.pendingReveal).toString().toByteArray())
     }
 
     private suspend fun persistIndex() {
@@ -121,10 +173,19 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
         atomic(index, saved.toString().toByteArray())
     }
 
-    fun open(entry: DocumentEntry) {
+    fun open(entry: DocumentEntry, reveal: JSONObject? = null) {
         if (entry.directory || opening) return
         val existing = documents.firstOrNull { it.entry.uri == entry.uri }
-        if (existing != null) { activate(existing); return }
+        if (existing != null) {
+            if (reveal != null) queue.trySend {
+                check(existing)
+                withContext(Dispatchers.Main) { existing.pendingReveal = reveal }
+                persist(existing)
+            }
+            activate(existing)
+            queue.trySend { persist(existing) }
+            return
+        }
         opening = true
         queue.trySend {
             try {
@@ -137,11 +198,12 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
                 }
                 if (!session.base.exists() && !session.dirty) session.revision = repository.snapshot(entry, session.base)
                 if (!session.base.exists()) throw java.io.IOException("The cached document is unavailable. Reopen the original folder.")
+                session.pendingReveal = reveal ?: session.pendingReveal
+                check(session)
                 persist(session)
                 repository.recordRecent(entry)
                 withContext(Dispatchers.Main) { documents.add(session); activeId = id }
                 persistIndex()
-                check(session)
             } catch (error: Exception) {
                 withContext(Dispatchers.Main) { message = error.message ?: "Unable to open document." }
             } finally { withContext(Dispatchers.Main) { opening = false } }
@@ -160,12 +222,15 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
                 session.externalChanged = actual.modified != session.entry.modified || actual.size != session.entry.size
                 if (session.error?.startsWith("File unavailable:") == true) session.error = null
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             withContext(Dispatchers.Main) { session.error = "File unavailable: ${error.message}. The cached buffer and drafts are retained." }
         }
     }
 
     fun checkActive() { documents.firstOrNull { it.id == activeId }?.let { session -> queue.trySend { check(session) } } }
+    suspend fun verifySearchSource(session: OpenDocument) { check(session) }
 
     fun accept(session: OpenDocument, event: JSONObject) {
         queue.trySend {
@@ -274,6 +339,140 @@ class DocumentSessions(application: Application) : AndroidViewModel(application)
             }
             persistIndex()
         }
+    }
+
+    fun showSearch(visible: Boolean) {
+        searchVisible = visible
+        savedState["searchVisible"] = visible
+        if (visible) { activate(null); runSearch() }
+    }
+
+    fun updateSearch(query: String = searchQuery, semantic: Boolean = semanticSearch) {
+        searchQuery = query.take(256)
+        semanticSearch = semantic
+        savedState["searchQuery"] = searchQuery
+        savedState["semanticSearch"] = semanticSearch
+        selectedHit = -1
+        savedState["selectedHit"] = -1
+        searchHits = emptyList()
+        runSearch()
+    }
+
+    private fun runSearch() {
+        queryJob?.cancel()
+        val version = ++queryVersion
+        queryJob = null
+        searching = false
+        searchError = null
+        if (!foreground || searchQuery.isBlank()) { searchHits = emptyList(); return }
+        if (semanticSearch && !semanticEngine.status.value.installed) { searchHits = emptyList(); return }
+        val query = searchQuery
+        val semantic = semanticSearch
+        val selection = searchHits.getOrNull(selectedHit)
+        queryJob = viewModelScope.launch {
+            searching = true
+            try {
+                delay(300)
+                val found = searchIndex.search(query, semantic)
+                searchHits = found
+                if (selection != null) {
+                    selectedHit = found.indexOfFirst { it.entry.uri == selection.entry.uri && it.page == selection.page && it.line == selection.line && it.text == selection.text }
+                } else if (selectedHit >= found.size) selectedHit = -1
+                savedState["selectedHit"] = selectedHit
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                searchError = error.message ?: "Search failed. Keyword search remains available."
+            }
+            finally { if (version == queryVersion) searching = false }
+        }
+    }
+
+    fun setForeground(value: Boolean) {
+        if (foreground == value) return
+        foreground = value
+        if (!value) {
+            providerObserver?.close()
+            providerObserver = null
+            refreshJob?.cancel()
+            refreshJob = null
+            queryJob?.cancel()
+            queryJob = null
+            searching = false
+            return
+        }
+        providerObserver = repository.observe { refreshSearch() }
+        refreshJob = viewModelScope.launch {
+            for (ignored in refreshRequests) {
+                delay(650)
+                // Drain bursts without cancelling an in-progress provider scan.
+                while (refreshRequests.tryReceive().isSuccess) { }
+                val force = forceRefresh
+                forceRefresh = false
+                try { searchIndex.refresh(force); runSearch() }
+                catch (cancelled: CancellationException) { forceRefresh = forceRefresh || force; throw cancelled }
+                catch (error: Exception) { searchError = error.message ?: "The search index could not be refreshed." }
+            }
+        }
+        refreshSearch()
+        runSearch()
+        checkActive()
+    }
+
+    fun refreshSearch(force: Boolean = false) {
+        forceRefresh = forceRefresh || force
+        if (foreground) refreshRequests.trySend(Unit)
+    }
+
+    fun downloadSearchModel() {
+        if (modelJob?.isActive == true) return
+        downloadingSearchModel = true
+        modelJob = viewModelScope.launch {
+            try { semanticEngine.download(); refreshSearch(); runSearch() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { searchError = error.message ?: "Model installation failed." }
+            finally { downloadingSearchModel = false }
+        }
+    }
+
+    fun cancelSearchModelDownload() { modelJob?.cancel() }
+
+    fun removeSearchModel() {
+        modelJob?.cancel()
+        modelJob = viewModelScope.launch {
+            try { semanticEngine.remove(); updateSearch(semantic = false); refreshSearch() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { searchError = error.message ?: "The model could not be removed." }
+        }
+    }
+
+    fun openSearchHit(index: Int, expected: SearchHit? = null) {
+        if (opening) return
+        val hit = expected ?: searchHits.getOrNull(index) ?: return
+        selectedHit = searchHits.indexOf(hit)
+        savedState["selectedHit"] = selectedHit
+        val reveal = JSONObject().put("query", hit.query.ifBlank { searchQuery }).put("page", hit.page)
+            .put("line", hit.line).put("endLine", hit.endLine).put("text", hit.text).put("semantic", hit.semantic)
+            .put("sourceModified", hit.entry.modified).put("sourceSize", hit.entry.size)
+        savedState["pendingSearchOpen"] = JSONObject().put("entry", hit.entry.toJson()).put("reveal", reveal).toString()
+        open(hit.entry, reveal)
+    }
+
+    fun revealDelivered(session: OpenDocument, reveal: JSONObject) {
+        if (session.pendingReveal !== reveal) return
+        session.pendingReveal = null
+        savedState.remove<String>("pendingSearchOpen")
+        queue.trySend { persist(session) }
+    }
+
+    override fun onCleared() {
+        providerObserver?.close()
+        refreshJob?.cancel()
+        queryJob?.cancel()
+        modelJob?.cancel()
+        searchIndex.close()
+        semanticEngine.close()
+        super.onCleared()
     }
 
     fun setTheme(mode: String) {

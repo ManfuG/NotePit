@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
+import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -60,6 +61,7 @@ fun FilesScreen(
     onOpen: (DocumentEntry) -> Unit,
     onSync: () -> Unit,
     onTheme: () -> Unit,
+    onContentSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -226,6 +228,7 @@ fun FilesScreen(
                         IconButton(onClick = { selected = ArrayList(visible.map { it.uri }) }, enabled = !busy) { Icon(Icons.Outlined.SelectAll, "Select all visible files") }
                         IconButton(onClick = { selected = arrayListOf() }, enabled = !busy) { Icon(Icons.Outlined.Close, "Clear selection") }
                     } else {
+                        IconButton(onClick = onContentSearch) { Icon(Icons.AutoMirrored.Outlined.ManageSearch, "Search contents in all folders") }
                         IconButton(onClick = onTheme) { Icon(Icons.Outlined.Palette, "Appearance") }
                         IconButton(onClick = { refresh++ }, enabled = !busy) { Icon(Icons.Outlined.Refresh, "Refresh") }
                         Box {

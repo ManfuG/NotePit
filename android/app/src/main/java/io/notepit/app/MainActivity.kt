@@ -32,6 +32,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class MainActivity : ComponentActivity() {
     private val sessions: DocumentSessions by viewModels()
@@ -64,7 +65,21 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
     var reload by remember { mutableStateOf<OpenDocument?>(null) }
     var copying by remember { mutableStateOf<OpenDocument?>(null) }
     var copyName by rememberSaveable { mutableStateOf("") }
+    var navigatingSearch by remember { mutableStateOf(false) }
     val active = model.documents.firstOrNull { it.id == model.activeId }
+    fun openSearchResult(index: Int) {
+        if (navigatingSearch || model.opening) return
+        val hit = model.searchHits.getOrNull(index) ?: return
+        navigatingSearch = true
+        scope.launch {
+            try {
+                engines.values.toList().forEach { it.flush().await() }
+                sync = false
+                model.openSearchHit(index, hit)
+            } catch (error: Exception) { model.message = "The search result was not opened because a draft could not be checkpointed: ${error.message}" }
+            finally { navigatingSearch = false }
+        }
+    }
     fun requestClose(document: OpenDocument) {
         scope.launch {
             try {
@@ -87,15 +102,25 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
             model.message?.let { snackbars.showSnackbar(it); model.message = null }
         }
         DisposableEffect(lifecycle, model) {
-            val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) model.checkActive() }
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_START -> model.setForeground(true)
+                    Lifecycle.Event.ON_RESUME -> model.checkActive()
+                    Lifecycle.Event.ON_STOP -> model.setForeground(false)
+                    else -> Unit
+                }
+            }
             lifecycle.lifecycle.addObserver(observer)
-            onDispose { lifecycle.lifecycle.removeObserver(observer) }
+            model.setForeground(lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+            onDispose { lifecycle.lifecycle.removeObserver(observer); model.setForeground(false) }
         }
-        BackHandler(active != null || sync) {
+        BackHandler(active != null || sync || model.searchVisible) {
             if (immersive) { immersive = false; active?.let { engines[it.id]?.command("immersive:off") } }
-            else { active?.let { engines[it.id]?.flush() }; model.activate(null); sync = false }
+            else if (active != null) { engines[active.id]?.flush(); model.activate(null) }
+            else if (model.searchVisible) model.showSearch(false)
+            else sync = false
         }
-        BackHandler(active == null && !sync) { activity.moveTaskToBack(true) }
+        BackHandler(active == null && !sync && !model.searchVisible) { activity.moveTaskToBack(true) }
         Surface(Modifier.fillMaxSize()) {
             Box {
                 Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
@@ -104,11 +129,20 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
                             !model.initialized -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                             active != null -> key(active.id, active.reload) {
                                 val engine = remember(active.id, active.reload) {
-                                    try { engines[active.id] ?: DocumentWebView(context, active, model, dark).also { engines[active.id] = it } }
+                                    try {
+                                        val cached = engines[active.id]
+                                        if (cached != null && cached.generation != active.reload) { engines.remove(active.id); cached.destroy() }
+                                        engines[active.id] ?: DocumentWebView(context, active, model, dark).also { engines[active.id] = it }
+                                    }
                                     catch (error: Exception) { active.error = error.message; null }
                                 }
                                 DisposableEffect(engine) {
                                     onDispose { engine?.flush() }
+                                }
+                                LaunchedEffect(active.id, engine?.ready, active.pendingReveal) {
+                                    try { engine?.revealPending() }
+                                    catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (error: Exception) { active.error = "The search location could not be revealed: ${error.message}. The buffer and pending location are retained." }
                                 }
                                 LaunchedEffect(active.id) {
                                     // Retain at most two renderers; tabs and drafts remain independently durable.
@@ -125,18 +159,27 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
                                     onCopy = { copying = active; copyName = active.entry.name.substringBeforeLast('.', active.entry.name) + "-local-copy" + active.entry.name.substringAfterLast('.', "").let { if (it.isBlank()) "" else ".$it" } },
                                     onTheme = { themeDialog = true },
                                     onImmersive = { immersive = !immersive; engine?.command(if (immersive) "immersive:on" else "immersive:off") },
+                                    searchHit = model.searchHits.getOrNull(model.selectedHit)?.takeIf { it.entry.uri == active.entry.uri },
+                                    resultPosition = if (model.selectedHit >= 0) "${model.selectedHit + 1}/${model.searchHits.size}" else "",
+                                    onResults = { engine?.flush(); model.showSearch(true) },
+                                    onPreviousResult = { openSearchResult(if (model.selectedHit <= 0) model.searchHits.lastIndex else model.selectedHit - 1) },
+                                    onNextResult = { if (model.searchHits.isNotEmpty()) openSearchResult((model.selectedHit + 1).mod(model.searchHits.size)) },
+                                    onPreviousDocument = { adjacentSearchDocument(model.searchHits, model.selectedHit, -1)?.let(::openSearchResult) },
+                                    onNextDocument = { adjacentSearchDocument(model.searchHits, model.selectedHit, 1)?.let(::openSearchResult) },
+                                    searchNavigationEnabled = !navigatingSearch && !model.opening,
                                 )
                             }
+                            model.searchVisible -> states.SaveableStateProvider("search") { SearchScreen(model, onBack = { model.showSearch(false) }, onOpen = ::openSearchResult) }
                             sync -> states.SaveableStateProvider("sync") { SyncScreen(model.repository, onBack = { sync = false }) }
                             else -> states.SaveableStateProvider("files") {
-                                FilesScreen(model.repository, onOpen = { entry -> engines.values.forEach { it.flush() }; sync = false; model.open(entry) }, onSync = { sync = true }, onTheme = { themeDialog = true })
+                                FilesScreen(model.repository, onOpen = { entry -> engines.values.forEach { it.flush() }; sync = false; model.open(entry) }, onSync = { sync = true }, onTheme = { themeDialog = true }, onContentSearch = { sync = false; model.showSearch(true) })
                             }
                         }
                     }
                     if (model.documents.isNotEmpty() && !immersive) {
                         Surface(tonalElevation = 3.dp) {
                             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { active?.let { engines[it.id]?.flush() }; sync = false; model.activate(null) }) { Icon(Icons.Outlined.FolderOpen, "Files") }
+                                IconButton(onClick = { active?.let { engines[it.id]?.flush() }; sync = false; model.showSearch(false); model.activate(null) }) { Icon(Icons.Outlined.FolderOpen, "Files") }
                                 model.documents.forEach { document ->
                                     FilterChip(selected = document.id == model.activeId, onClick = { active?.let { engines[it.id]?.flush() }; sync = false; model.activate(document) },
                                         label = { Text(document.entry.name + if (document.dirty) " •" else "", Modifier.widthIn(max = 150.dp), maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -175,7 +218,8 @@ private fun NotePitApp(model: DocumentSessions, engines: LinkedHashMap<String, D
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DocumentPane(session: OpenDocument, engine: DocumentWebView?, immersive: Boolean, onBack: () -> Unit, onClose: () -> Unit, onReload: () -> Unit, onCopy: () -> Unit, onTheme: () -> Unit, onImmersive: () -> Unit) {
+private fun DocumentPane(session: OpenDocument, engine: DocumentWebView?, immersive: Boolean, onBack: () -> Unit, onClose: () -> Unit, onReload: () -> Unit, onCopy: () -> Unit, onTheme: () -> Unit, onImmersive: () -> Unit,
+    searchHit: SearchHit?, resultPosition: String, onResults: () -> Unit, onPreviousResult: () -> Unit, onNextResult: () -> Unit, onPreviousDocument: () -> Unit, onNextDocument: () -> Unit, searchNavigationEnabled: Boolean) {
     var menu by remember { mutableStateOf(false) }
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
@@ -194,6 +238,18 @@ private fun DocumentPane(session: OpenDocument, engine: DocumentWebView?, immers
         }) },
         floatingActionButton = { if (immersive) SmallFloatingActionButton(onClick = onImmersive) { Icon(Icons.Outlined.FullscreenExit, "Exit immersive reading") } },
     ) { padding -> Column(Modifier.fillMaxSize().padding(padding)) {
+        if (searchHit != null && !immersive) Surface(tonalElevation = 2.dp) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onPreviousDocument, enabled = searchNavigationEnabled) { Icon(Icons.Outlined.SkipPrevious, "Previous document in search results") }
+                    IconButton(onClick = onPreviousResult, enabled = searchNavigationEnabled) { Icon(Icons.Outlined.KeyboardArrowUp, "Previous search result") }
+                    TextButton(onClick = onResults, modifier = Modifier.weight(1f)) { Text("$resultPosition · ${searchReference(searchHit)} · Results", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    IconButton(onClick = onNextResult, enabled = searchNavigationEnabled) { Icon(Icons.Outlined.KeyboardArrowDown, "Next search result") }
+                    IconButton(onClick = onNextDocument, enabled = searchNavigationEnabled) { Icon(Icons.Outlined.SkipNext, "Next document in search results") }
+                }
+                if (session.dirty || session.externalChanged) Text("The indexed original differs from this buffer. Verify the passage; coordinates may have moved.", Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
         if (session.externalChanged || session.error != null) Surface(color = MaterialTheme.colorScheme.errorContainer) {
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
                 Text(session.error ?: "The original changed outside NotePit. Reload it or save a separate copy.", style = MaterialTheme.typography.bodySmall)
@@ -209,4 +265,13 @@ private fun DocumentPane(session: OpenDocument, engine: DocumentWebView?, immers
             }
         }, onRelease = { it.removeAllViews() })
     } }
+}
+
+private fun adjacentSearchDocument(hits: List<SearchHit>, selected: Int, direction: Int): Int? {
+    val current = hits.getOrNull(selected) ?: return null
+    for (offset in 1 until hits.size) {
+        val candidate = (selected + direction * offset).mod(hits.size)
+        if (hits[candidate].entry.uri != current.entry.uri) return candidate
+    }
+    return null
 }
