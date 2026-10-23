@@ -35,7 +35,6 @@ import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
 import kotlin.math.ln
 import kotlinx.coroutines.CoroutineStart
@@ -83,10 +82,12 @@ class SearchIndexTest {
         assertFalse("Search performed provider I/O on the main thread", provider.sawMainThread)
         context.getSharedPreferences("folders", 0).edit().clear().commit()
         context.getSharedPreferences("notepit-library", 0).edit().clear().commit()
+        context.getSharedPreferences("notepit-content-versions", 0).edit().clear().commit()
         context.privateDirectory.deleteRecursively()
     }
 
-    @Test fun incrementalAddSaveExternalSameMetadataDeleteAndDisconnect(): Unit = runBlocking {
+    @Test fun localSavesSurviveRestartAndOpaqueExternalEditsUseExplicitRebuild(): Unit = runBlocking {
+        provider.opaqueMetadata = true
         val first = provider.add("first.txt", "alpha uniqueBefore")
         index.refresh()
         assertEquals("Initial indexing failed: ${index.status.value}", 1, index.status.value.documents)
@@ -102,12 +103,18 @@ class SearchIndexTest {
         val firstEntry = repository.query(entry(first))
         val revision = repository.snapshot(firstEntry, snapshot)
         repository.save(firstEntry, source, revision)
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
         index.refresh()
         assertTrue(index.search("uniqueBefore").isEmpty())
         assertEquals(1, index.search("uniqueAfter!").size)
-        // The provider deliberately reports modified=0 and a constant size for all files.
+        // An external edit with no metadata change or notification needs explicit verification.
         first.file.writeText("alpha externalNew!")
         index.refresh()
+        assertEquals(1, index.search("uniqueAfter!").size)
+        assertTrue(index.search("externalNew!").isEmpty())
+        index.refresh(force = true)
         assertTrue(index.search("uniqueAfter!").isEmpty())
         assertEquals(1, index.search("externalNew!").size)
         repository.delete(listOf(repository.query(entry(added))))
@@ -119,6 +126,36 @@ class SearchIndexTest {
         index.refresh()
         repository.disconnect(root)
         assertTrue(index.search("disconnect").isEmpty())
+    }
+
+    @Test fun unchangedSourcesStayUnopenedAcrossRestartAndOnlyChangedSourcesAreRead(): Unit = runBlocking {
+        val first = provider.add("first.txt", "beforeToken")
+        val second = provider.add("second.txt", "untouchedToken")
+        index.refresh()
+        assertEquals(mapOf(first.id to 1, second.id to 1), provider.reads)
+        val originalPassages = passageIds(second.id)
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+        index.refresh()
+        assertEquals("Reopening must not read unchanged source contents", mapOf(first.id to 1, second.id to 1), provider.reads)
+        val modified = first.file.lastModified()
+        first.file.writeText("afterToken!")
+        assertTrue(first.file.setLastModified(modified + 2_000))
+        index.refresh()
+        assertTrue(index.search("beforeToken").isEmpty())
+        assertEquals("first.txt", index.search("afterToken!").single().entry.name)
+        assertEquals(mapOf(first.id to 2, second.id to 1), provider.reads)
+        assertEquals(originalPassages, passageIds(second.id))
+        second.file.appendText(" appendedToken")
+        index.refresh()
+        assertEquals("second.txt", index.search("appendedToken").single().entry.name)
+        assertEquals(mapOf(first.id to 2, second.id to 2), provider.reads)
+        val checkedReads = provider.reads.toMap()
+        index.refresh()
+        assertEquals(checkedReads, provider.reads)
+        index.refresh(force = true)
+        assertEquals(checkedReads.mapValues { it.value + 1 }, provider.reads)
     }
 
     @Test fun indexingChangingRootMetadataDoesNotScheduleItselfAgain(): Unit = runBlocking {
@@ -189,12 +226,11 @@ class SearchIndexTest {
         provider.add("existing.txt", "publishedExistingNeedle")
         index.refresh()
         provider.add("first-new.txt", "publishedProgressNeedle")
-        provider.add("second-new.txt", "unpublishedLaterNeedle")
+        val blocked = provider.add("second-new.txt", "unpublishedLaterNeedle")
         val waiting = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val opens = AtomicInteger()
         provider.beforeOpen = {
-            if (opens.incrementAndGet() == 3) {
+            if (it == blocked.id) {
                 waiting.countDown()
                 check(release.await(10, TimeUnit.SECONDS)) { "Blocked-provider test was not released" }
             }
@@ -378,15 +414,17 @@ class SearchIndexTest {
         override fun checkPermission(permission: String, pid: Int, uid: Int) = PackageManager.PERMISSION_GRANTED
     }
 
-    /** Reports deliberately untrustworthy metadata to exercise content-hash incremental detection. */
+    /** Can withhold metadata to exercise local invalidation and explicit full verification. */
     private class SearchProvider(private val directory: File) : DocumentsProvider() {
         data class Node(val id: String, val name: String, val mime: String, val file: File, var parent: String = "root")
         private val rootNode = Node("root", "Search root", Document.MIME_TYPE_DIR, directory, parent = "")
         val nodes = LinkedHashMap<String, Node>()
         val denied = HashSet<String>()
+        val reads = HashMap<String, Int>()
         var sawMainThread = false
-        var beforeOpen: (() -> Unit)? = null
+        var beforeOpen: ((String) -> Unit)? = null
         var changingRootMetadata = false
+        var opaqueMetadata = false
         private var rootModified = 0L
         init { directory.mkdirs() }
         fun add(name: String, text: String) = add(name, text.toByteArray(), "text/plain")
@@ -404,8 +442,8 @@ class SearchIndexTest {
                 Document.COLUMN_DISPLAY_NAME -> node.name
                 Document.COLUMN_MIME_TYPE -> node.mime
                 Document.COLUMN_FLAGS -> if (node.mime == Document.MIME_TYPE_DIR) Document.FLAG_DIR_SUPPORTS_CREATE else Document.FLAG_SUPPORTS_WRITE or Document.FLAG_SUPPORTS_DELETE
-                Document.COLUMN_SIZE -> 0L
-                Document.COLUMN_LAST_MODIFIED -> if (id == "root" && changingRootMetadata) ++rootModified else 0L
+                Document.COLUMN_SIZE -> if (opaqueMetadata || node.mime == Document.MIME_TYPE_DIR) 0L else node.file.length()
+                Document.COLUMN_LAST_MODIFIED -> if (id == "root" && changingRootMetadata) ++rootModified else if (opaqueMetadata) 0L else node.file.lastModified()
                 else -> null
             } }.toTypedArray())
         }
@@ -428,9 +466,10 @@ class SearchIndexTest {
         }
         override fun openDocument(documentId: String, mode: String, signal: CancellationSignal?): ParcelFileDescriptor {
             thread(); signal?.throwIfCanceled()
-            beforeOpen?.invoke()
+            beforeOpen?.invoke(documentId)
             if (documentId in denied) throw SecurityException("Unreadable test document")
             val node = nodes[documentId] ?: throw FileNotFoundException(documentId)
+            if (!mode.contains('w')) reads[documentId] = (reads[documentId] ?: 0) + 1
             return ParcelFileDescriptor.open(node.file, ParcelFileDescriptor.parseMode(mode))
         }
         override fun deleteDocument(documentId: String) {

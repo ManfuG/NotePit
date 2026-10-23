@@ -68,6 +68,7 @@ class DocumentsRepositoryTest {
         assertFalse("A provider operation ran on the main thread", provider.sawMainThread)
         context.getSharedPreferences("folders", 0).edit().clear().commit()
         context.getSharedPreferences("notepit-library", 0).edit().clear().commit()
+        context.getSharedPreferences("notepit-content-versions", 0).edit().clear().commit()
         context.privateDirectory.deleteRecursively()
     }
 

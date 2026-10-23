@@ -69,6 +69,7 @@ class DocumentsRepository(context: Context) {
     private val mutex = Mutex()
     private val changeLock = Any()
     private val cacheLock = Any()
+    private val contentVersions = this.context.getSharedPreferences("notepit-content-versions", Context.MODE_PRIVATE)
     private val mutableChanges = MutableStateFlow(0L)
     val changes: StateFlow<Long> = mutableChanges.asStateFlow()
     private val mutableRecoveryFiles = MutableStateFlow<List<String>>(emptyList())
@@ -82,6 +83,18 @@ class DocumentsRepository(context: Context) {
 
     /** Last published grant state; search reads never wait for a provider's blocking stream. */
     internal fun connectedRootsSnapshot(): List<DocumentEntry> = rootEntries
+
+    internal fun contentVersion(entry: DocumentEntry): Long = contentVersions.getLong(identity(entry), 0L)
+
+    private fun invalidateContent(uri: Uri) {
+        val key = try { "${uri.authority}:${DocumentsContract.getDocumentId(uri)}" }
+        catch (_: IllegalArgumentException) { return }
+        synchronized(changeLock) {
+            if (!contentVersions.edit().putLong(key, contentVersions.getLong(key, 0L) + 1).commit()) {
+                throw IOException("Could not record the document change.")
+            }
+        }
+    }
 
     init {
         scope.launch {
@@ -407,6 +420,8 @@ class DocumentsRepository(context: Context) {
                 // Recheck after staging: never truncate a revision different from the user's snapshot.
                 if (hashDocument(Uri.parse(current.uri)) != originalHash) throw FileConflictException("The file changed while preparing the save. Your edits are retained; save a copy.")
                 currentCoroutineContext().ensureActive()
+                // Persist before writing; snapshots share this mutex and cannot observe a half-save.
+                invalidateContent(Uri.parse(current.uri))
                 writing = true
                 writeDocument(Uri.parse(current.uri), staged)
                 if (hashDocument(Uri.parse(current.uri)) != newHash) throw IOException("The provider did not retain the complete saved bytes.")
@@ -512,8 +527,15 @@ class DocumentsRepository(context: Context) {
         val closed = AtomicBoolean(false)
         val observerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val observer = object : ContentObserver(null) {
-            override fun onChange(selfChange: Boolean) { if (!closed.get()) changed() }
-            override fun onChange(selfChange: Boolean, uri: Uri?) { onChange(selfChange) }
+            override fun onChange(selfChange: Boolean) { onChange(selfChange, null) }
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                if (!closed.get()) observerScope.launch {
+                    if (!closed.get()) {
+                        uri?.let { invalidateContent(it) }
+                        changed()
+                    }
+                }
+            }
         }
         observerScope.launch {
             mutex.withLock { load() }

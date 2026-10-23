@@ -86,7 +86,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
         finally { if (closed.get()) { database?.close(); database = null } }
     }
 
-    /** Hash every snapshot, even when provider timestamps/sizes are unchanged or missing. */
+    /** Reconcile metadata; read contents only for new/changed sources or an explicit rebuild. */
     suspend fun refresh(force: Boolean = false) = withContext(Dispatchers.IO) {
         refreshMutex.withLock {
             check(!closed.get()) { "Search is closed." }
@@ -97,6 +97,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
             fun excluded(path: String, error: Exception) {
                 failures++
                 lastFailure = "$path: ${error.message ?: "unreadable document"}"
+                mutableStatus.value = mutableStatus.value.copy(failures = failures)
             }
             val snapshot = File(context.cacheDir, "search-snapshot-${System.nanoTime()}")
             try {
@@ -106,6 +107,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
                 withDatabase { db ->
                     removeDisconnected(db, rootUris)
                     if (!semanticEngine.status.value.installed && !semanticEngine.status.value.busy) db.execSQL("UPDATE passages SET vector=NULL WHERE vector IS NOT NULL")
+                    mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(), passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt())
                 }
                 for (root in roots) {
                     currentCoroutineContext().ensureActive()
@@ -135,28 +137,40 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
                                 try {
                                     val maximum = if (entry.pdf || entry.mime == "application/pdf") MAX_PDF_BYTES else MAX_TEXT_BYTES
                                     if (entry.size > maximum) throw IOException("Excluded: exceeds ${maximum / 1024 / 1024} MiB indexing limit")
-                                    val revision = repository.snapshot(entry, snapshot, maximum)
-                                    if (snapshot.length() > maximum) throw IOException("Excluded: exceeds ${maximum / 1024 / 1024} MiB indexing limit")
-                                    val previous = withDatabase { db -> db.rawQuery("SELECT revision FROM documents WHERE uri=?", arrayOf(entry.uri)).use { if (it.moveToFirst()) it.getString(0) else null } }
-                                    if (force || previous != revision) {
-                                        replaceDocument(entry, sourcePath, revision, generation, snapshot)
+                                    val version = repository.contentVersion(entry)
+                                    val previous = withDatabase { db ->
+                                        db.rawQuery("SELECT entry,revision,warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use {
+                                            if (it.moveToFirst()) {
+                                                val metadata = JSONObject(it.getString(0))
+                                                IndexedSource(DocumentEntry.fromJson(metadata), it.getString(1), metadata.optLong("contentVersion"), it.getString(2))
+                                            } else null
+                                        }
+                                    }
+                                    val formatChanged = previous != null && (previous.entry.mime != entry.mime || previous.entry.pdf != entry.pdf)
+                                    val revision = if (force || previous == null || formatChanged || previous.version != version ||
+                                        previous.entry.size != entry.size || previous.entry.modified != entry.modified) {
+                                        repository.snapshot(entry, snapshot, maximum)
+                                    } else previous.revision
+                                    var warning = previous?.warning.orEmpty()
+                                    if (force || previous?.revision != revision || formatChanged) {
+                                        replaceDocument(entry, sourcePath, revision, generation, snapshot, version)
+                                        withDatabase { db ->
+                                            warning = db.rawQuery("SELECT warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use { it.moveToFirst(); it.getString(0) }
+                                            mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(), passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt())
+                                        }
                                     } else {
                                         withDatabase { db ->
                                             db.update("documents", ContentValues().apply {
-                                                put("entry", entry.toJson().toString()); put("path", sourcePath)
+                                                put("entry", entry.toJson().put("contentVersion", version).toString()); put("path", sourcePath)
                                                 put("root", entry.treeUri); put("generation", generation)
                                             }, "uri=?", arrayOf(entry.uri))
                                         }
                                     }
-                                    val warning = withDatabase { db -> db.rawQuery("SELECT warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use { if (it.moveToFirst()) it.getString(0) else "" } }
                                     if (warning.isNotEmpty()) excluded(sourcePath, IOException(warning))
                                     if (semanticEngine.status.value.installed) {
                                         try { embedMissing(entry.uri) }
                                         catch (error: CancellationException) { throw error }
                                         catch (error: Exception) { excluded(sourcePath, IOException("Keyword index retained; embedding failed: ${error.message}", error)) }
-                                    }
-                                    withDatabase { db ->
-                                        mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(), passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt(), failures = failures)
                                     }
                                 } catch (error: CancellationException) { throw error }
                                 catch (error: Exception) {
@@ -195,7 +209,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
     }
 
     /** Extraction is disk-spooled without a SQL lock; only a complete document is published. */
-    private suspend fun replaceDocument(entry: DocumentEntry, path: String, revision: String, generation: Long, snapshot: File) {
+    private suspend fun replaceDocument(entry: DocumentEntry, path: String, revision: String, generation: Long, snapshot: File, version: Long) {
         val staged = File.createTempFile("search-passages-", ".tmp", context.cacheDir)
         var count = 0
         var warning = ""
@@ -237,7 +251,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
                 try {
                     db.delete("documents", "uri=?", arrayOf(entry.uri))
                     db.insertOrThrow("documents", null, ContentValues().apply {
-                        put("uri", entry.uri); put("root", entry.treeUri); put("entry", entry.toJson().toString())
+                        put("uri", entry.uri); put("root", entry.treeUri); put("entry", entry.toJson().put("contentVersion", version).toString())
                         put("path", path); put("revision", revision); put("generation", generation); put("warning", warning)
                     })
                     DataInputStream(staged.inputStream().buffered()).use { input ->
@@ -392,6 +406,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
         stale.forEach { db.delete("documents", "root=?", arrayOf(it)) }
     }
 
+    private data class IndexedSource(val entry: DocumentEntry, val revision: String, val version: Long, val warning: String)
     private data class Ranked(val id: Long, val score: Double)
     private fun top(limit: Int) = PriorityQueue<Ranked>(limit, compareBy<Ranked> { it.score }.thenByDescending { it.id })
     private fun offer(heap: PriorityQueue<Ranked>, item: Ranked, limit: Int) {
