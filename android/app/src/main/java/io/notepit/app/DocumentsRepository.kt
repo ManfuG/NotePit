@@ -36,10 +36,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -69,12 +73,13 @@ class DocumentsRepository(context: Context) {
     private val mutex = Mutex()
     private val changeLock = Any()
     private val cacheLock = Any()
+    private var cacheGeneration = 0L
     private val contentVersions = this.context.getSharedPreferences("notepit-content-versions", Context.MODE_PRIVATE)
     private val mutableChanges = MutableStateFlow(0L)
     val changes: StateFlow<Long> = mutableChanges.asStateFlow()
     private val mutableRecoveryFiles = MutableStateFlow<List<String>>(emptyList())
     val retainedRecoveryFiles: StateFlow<List<String>> = mutableRecoveryFiles.asStateFlow()
-    private var loaded = false
+    @Volatile private var loaded = false
     @Volatile private var rootEntries: List<DocumentEntry> = emptyList()
     @Volatile private var favoriteEntries: List<DocumentEntry> = emptyList()
     @Volatile private var recentEntries: List<DocumentEntry> = emptyList()
@@ -83,6 +88,10 @@ class DocumentsRepository(context: Context) {
 
     /** Last published grant state; search reads never wait for a provider's blocking stream. */
     internal fun connectedRootsSnapshot(): List<DocumentEntry> = rootEntries
+
+    internal suspend fun ready() {
+        if (!loaded) withContext(Dispatchers.IO) { mutex.withLock { load() } }
+    }
 
     internal fun contentVersion(entry: DocumentEntry): Long = contentVersions.getLong(identity(entry), 0L)
 
@@ -104,8 +113,45 @@ class DocumentsRepository(context: Context) {
         }
     }
 
+    /** Notifications are hints, not writes. Share physical observation across UI/index subscribers. */
+    private val providerHints = callbackFlow<Unit> {
+        val observer = object : ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) { onChange(selfChange, null, 0) }
+            override fun onChange(selfChange: Boolean, uri: Uri?) { onChange(selfChange, uri, 0) }
+            override fun onChange(selfChange: Boolean, uri: Uri?, flags: Int) {
+                launch {
+                    clearCache()
+                    if (flags and android.content.ContentResolver.NOTIFY_UPDATE != 0) {
+                        uri?.let { invalidateContent(it) }
+                        changed()
+                    } else trySend(Unit)
+                }
+            }
+        }
+        val registration = launch {
+            ready()
+            var registered = emptySet<String>()
+            changes.collect {
+                val watched = rootEntries.map { Uri.Builder().scheme("content").authority(Uri.parse(it.treeUri).authority).build().toString() }.toSet()
+                if (registered != watched) {
+                    resolver.unregisterContentObserver(observer)
+                    watched.forEach { uri ->
+                        try { resolver.registerContentObserver(Uri.parse(uri), true, observer) }
+                        catch (_: SecurityException) { /* Lost grants/provider observation restrictions. */ }
+                    }
+                    registered = watched
+                }
+            }
+        }
+        awaitClose { registration.cancel(); resolver.unregisterContentObserver(observer) }
+    }.shareIn(scope, SharingStarted.WhileSubscribed(), replay = 0)
+
+    private fun clearCache() {
+        synchronized(cacheLock) { cache.clear(); cacheGeneration++ }
+    }
+
     private fun changed() {
-        synchronized(cacheLock) { cache.clear() }
+        clearCache()
         synchronized(changeLock) { mutableChanges.value += 1 }
     }
 
@@ -214,7 +260,7 @@ class DocumentsRepository(context: Context) {
 
     fun list(parent: DocumentEntry): Flow<List<DocumentEntry>> = flow {
         mutex.withLock { load() }
-        val generation = changes.value
+        val generation = synchronized(cacheLock) { cacheGeneration }
         val cached = synchronized(cacheLock) { cache[parent.uri]?.toList() }
         if (cached != null) emit(cached)
         val freshParent = queryRaw(parent)
@@ -232,7 +278,7 @@ class DocumentsRepository(context: Context) {
         currentCoroutineContext().ensureActive()
         val complete = results.toList()
         if (complete.size <= 2_000) synchronized(cacheLock) {
-            if (changes.value == generation) {
+            if (cacheGeneration == generation) {
                 cache[parent.uri] = complete
                 while (cache.size > 32 || cache.values.sumOf { it.size } > 10_000) cache.remove(cache.keys.first())
             }
@@ -523,39 +569,19 @@ class DocumentsRepository(context: Context) {
         results
     }
 
-    fun observe(onChange: () -> Unit): Closeable {
+    fun observe(onChange: () -> Unit, onProviderChange: () -> Unit = onChange): Closeable {
         val closed = AtomicBoolean(false)
         val observerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val observer = object : ContentObserver(null) {
-            override fun onChange(selfChange: Boolean) { onChange(selfChange, null) }
-            override fun onChange(selfChange: Boolean, uri: Uri?) {
-                if (!closed.get()) observerScope.launch {
-                    if (!closed.get()) {
-                        uri?.let { invalidateContent(it) }
-                        changed()
-                    }
-                }
+        observerScope.launch {
+            ready()
+            changes.collect {
+                withContext(Dispatchers.Main.immediate) { if (!closed.get()) onChange() }
             }
         }
         observerScope.launch {
-            mutex.withLock { load() }
-            var registered = emptySet<String>()
-            try {
-                changes.collect {
-                    val watched = rootEntries.map { root ->
-                        Uri.Builder().scheme("content").authority(Uri.parse(root.treeUri).authority).build().toString()
-                    }.toSet()
-                    if (registered != watched) {
-                        resolver.unregisterContentObserver(observer)
-                        watched.forEach { uri ->
-                            try { resolver.registerContentObserver(Uri.parse(uri), true, observer) }
-                            catch (_: SecurityException) { /* A lost grant or a provider forbidding broad observation. */ }
-                        }
-                        registered = watched
-                    }
-                    if (!closed.get()) withContext(Dispatchers.Main.immediate) { if (!closed.get()) onChange() }
-                }
-            } finally { resolver.unregisterContentObserver(observer) }
+            providerHints.collect {
+                withContext(Dispatchers.Main.immediate) { if (!closed.get()) onProviderChange() }
+            }
         }
         return Closeable { if (closed.compareAndSet(false, true)) observerScope.cancel() }
     }

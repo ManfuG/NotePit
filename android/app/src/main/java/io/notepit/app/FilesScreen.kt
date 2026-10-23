@@ -146,7 +146,7 @@ fun FilesScreen(
     BackHandler(!busy && (selected.isNotEmpty() || search.isNotEmpty() || path.isNotEmpty() || mode != "Files")) { back() }
     BackHandler(busy) { }
     DisposableEffect(repository, lifecycle) {
-        val observer = repository.observe { refresh++ }
+        val observer = repository.observe(onChange = { refresh++ }, onProviderChange = { if (!loading) refresh++ })
         val resume = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refresh++ }
         lifecycle.lifecycle.addObserver(resume)
         onDispose { observer.close(); lifecycle.lifecycle.removeObserver(resume) }

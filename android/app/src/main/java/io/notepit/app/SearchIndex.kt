@@ -3,6 +3,7 @@ package io.notepit.app
 import android.content.ContentValues
 import android.net.Uri
 import android.os.CancellationSignal
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.database.sqlite.SQLiteDatabase
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -49,7 +50,7 @@ data class SearchHit(
 
 data class SearchStatus(
     val busy: Boolean = false, val documents: Int = 0, val passages: Int = 0,
-    val message: String = "", val failures: Int = 0,
+    val message: String = "", val failures: Int = 0, val warnings: Int = 0,
 )
 
 /** Private, disposable index. It never writes to a provider or to an editor's live document. */
@@ -91,38 +92,41 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
         refreshMutex.withLock {
             check(!closed.get()) { "Search is closed." }
             refreshJob = currentCoroutineContext()[Job]
-            mutableStatus.value = mutableStatus.value.copy(busy = true, failures = 0, message = "Indexing connected folders…")
-            var failures = 0
-            var lastFailure = ""
-            fun excluded(path: String, error: Exception) {
-                failures++
-                lastFailure = "$path: ${error.message ?: "unreadable document"}"
-                mutableStatus.value = mutableStatus.value.copy(failures = failures)
+            mutableStatus.value = mutableStatus.value.copy(busy = true, failures = 0, warnings = 0, message = "Indexing connected folders…")
+            val skipped = HashSet<String>()
+            val warned = HashSet<String>()
+            var changed = false
+            var lastIssue = ""
+            fun issue(key: String, path: String, reason: String, unavailable: Boolean) {
+                if ((if (unavailable) skipped else warned).add(key)) {
+                    lastIssue = "$path: $reason"
+                    mutableStatus.value = mutableStatus.value.copy(failures = skipped.size, warnings = warned.size)
+                }
             }
             val snapshot = File(context.cacheDir, "search-snapshot-${System.nanoTime()}")
             try {
                 val generation = withDatabase { scalar(it, "SELECT COALESCE(MAX(generation),0)+1 FROM documents") }
                 val roots = repository.roots()
-                val rootUris = roots.map { it.treeUri }.toSet()
                 withDatabase { db ->
-                    removeDisconnected(db, rootUris)
+                    changed = removeDisconnected(db, roots.map { it.treeUri }.toSet())
                     if (!semanticEngine.status.value.installed && !semanticEngine.status.value.busy) db.execSQL("UPDATE passages SET vector=NULL WHERE vector IS NOT NULL")
-                    mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(), passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt())
+                    publishCounts(db)
                 }
+                val visitedFolders = HashSet<String>()
+                val visitedSources = HashSet<String>()
                 for (root in roots) {
                     currentCoroutineContext().ensureActive()
                     if (!root.available) {
-                        withDatabase { it.delete("documents", "root=?", arrayOf(root.treeUri)) }
-                        excluded(root.name, IOException("Folder unavailable or permission lost"))
+                        withDatabase { changed = (it.delete("documents", "root=?", arrayOf(root.treeUri)) > 0) || changed; publishCounts(it) }
+                        issue(identity(root), root.name, "Folder unavailable or permission lost", true)
                         continue
                     }
                     val folders = ArrayDeque<Pair<DocumentEntry, String>>()
-                    val visited = HashSet<String>()
                     folders.add(root to root.name)
                     while (folders.isNotEmpty()) {
                         currentCoroutineContext().ensureActive()
                         val (folder, path) = folders.removeLast()
-                        if (!visited.add(folder.uri)) continue
+                        if (!visitedFolders.add(identity(folder))) continue
                         try {
                             var children = emptyList<DocumentEntry>()
                             repository.list(folder).collect { children = it }
@@ -134,72 +138,98 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
                                     continue
                                 }
                                 if (!supported(entry)) continue
+                                val key = identity(entry)
+                                if (!visitedSources.add(key)) continue
+                                val version = repository.contentVersion(entry)
+                                val previous = withDatabase { db ->
+                                    db.rawQuery("SELECT entry,revision,warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use {
+                                        if (it.moveToFirst()) {
+                                            val metadata = JSONObject(it.getString(0))
+                                            IndexedSource(DocumentEntry.fromJson(metadata), it.getString(1), metadata.optLong("contentVersion"), it.getString(2),
+                                                if (metadata.optString("embeddingModel") == SemanticEngine.MODEL_REVISION) metadata.optString("embeddingError") else "")
+                                        } else null
+                                    }
+                                }
                                 try {
-                                    val maximum = if (entry.pdf || entry.mime == "application/pdf") MAX_PDF_BYTES else MAX_TEXT_BYTES
-                                    if (entry.size > maximum) throw IOException("Excluded: exceeds ${maximum / 1024 / 1024} MiB indexing limit")
-                                    val version = repository.contentVersion(entry)
-                                    val previous = withDatabase { db ->
-                                        db.rawQuery("SELECT entry,revision,warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use {
-                                            if (it.moveToFirst()) {
-                                                val metadata = JSONObject(it.getString(0))
-                                                IndexedSource(DocumentEntry.fromJson(metadata), it.getString(1), metadata.optLong("contentVersion"), it.getString(2))
-                                            } else null
-                                        }
-                                    }
                                     val formatChanged = previous != null && (previous.entry.mime != entry.mime || previous.entry.pdf != entry.pdf)
-                                    val revision = if (force || previous == null || formatChanged || previous.version != version ||
-                                        previous.entry.size != entry.size || previous.entry.modified != entry.modified) {
+                                    val candidate = force || previous == null || formatChanged || previous.version != version ||
+                                        previous.entry.size != entry.size || previous.entry.modified != entry.modified ||
+                                        (previous.revision.isEmpty() && previous.entry.flags != entry.flags)
+                                    val revision = if (candidate) {
+                                        val maximum = if (entry.pdf || entry.mime == "application/pdf") MAX_PDF_BYTES else MAX_TEXT_BYTES
+                                        if (entry.size > maximum) throw IOException("Excluded: exceeds ${maximum / 1024 / 1024} MiB indexing limit")
                                         repository.snapshot(entry, snapshot, maximum)
-                                    } else previous.revision
+                                    } else previous!!.revision
                                     var warning = previous?.warning.orEmpty()
-                                    if (force || previous?.revision != revision || formatChanged) {
-                                        replaceDocument(entry, sourcePath, revision, generation, snapshot, version)
-                                        withDatabase { db ->
-                                            warning = db.rawQuery("SELECT warning FROM documents WHERE uri=?", arrayOf(entry.uri)).use { it.moveToFirst(); it.getString(0) }
-                                            mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(), passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt())
-                                        }
-                                    } else {
-                                        withDatabase { db ->
-                                            db.update("documents", ContentValues().apply {
-                                                put("entry", entry.toJson().put("contentVersion", version).toString()); put("path", sourcePath)
-                                                put("root", entry.treeUri); put("generation", generation)
-                                            }, "uri=?", arrayOf(entry.uri))
-                                        }
+                                    val replaced = force || previous?.revision != revision || formatChanged
+                                    if (replaced) {
+                                        val publication = replaceDocument(entry, sourcePath, revision, generation, snapshot, version)
+                                        warning = publication.warning
+                                        mutableStatus.value = mutableStatus.value.copy(
+                                            documents = mutableStatus.value.documents + if (previous?.revision?.isNotEmpty() == true) 0 else 1,
+                                            passages = mutableStatus.value.passages + publication.passagesDelta)
+                                        changed = true
                                     }
-                                    if (warning.isNotEmpty()) excluded(sourcePath, IOException(warning))
-                                    if (semanticEngine.status.value.installed) {
-                                        try { embedMissing(entry.uri) }
-                                        catch (error: CancellationException) { throw error }
-                                        catch (error: Exception) { excluded(sourcePath, IOException("Keyword index retained; embedding failed: ${error.message}", error)) }
+                                    var embeddingError = if (replaced || !semanticEngine.status.value.installed && !semanticEngine.status.value.busy) "" else previous?.embeddingError.orEmpty()
+                                    if (revision.isEmpty()) {
+                                        issue(key, sourcePath, warning, true)
+                                    } else {
+                                        if (warning.isNotEmpty()) issue(key, sourcePath, warning, false)
+                                        if (semanticEngine.status.value.installed && embeddingError.isEmpty()) {
+                                            try { embedMissing(entry.uri) }
+                                            catch (error: CancellationException) { throw error }
+                                            catch (error: Exception) {
+                                                embeddingError = "Keyword index retained; embedding failed: ${error.message}"
+                                                changed = true
+                                            }
+                                        }
+                                        if (embeddingError.isNotEmpty()) issue(key, sourcePath, embeddingError, false)
+                                    }
+                                    withDatabase { db ->
+                                        val metadata = entry.toJson().put("contentVersion", version)
+                                        if (embeddingError.isNotEmpty()) metadata.put("embeddingError", embeddingError).put("embeddingModel", SemanticEngine.MODEL_REVISION)
+                                        db.update("documents", ContentValues().apply {
+                                            put("entry", metadata.toString()); put("path", sourcePath)
+                                            put("root", entry.treeUri); put("generation", generation)
+                                        }, "uri=?", arrayOf(entry.uri))
                                     }
                                 } catch (error: CancellationException) { throw error }
                                 catch (error: Exception) {
-                                    // Never serve a previous revision when the replacement cannot be read/indexed.
-                                    withDatabase { it.delete("documents", "uri=?", arrayOf(entry.uri)) }
-                                    excluded(sourcePath, error)
+                                    val reason = error.message ?: "Unreadable document"
+                                    withDatabase { db ->
+                                        val removed = passageCount(db, entry.uri)
+                                        // A terminal outcome is cached just like a successful revision.
+                                        db.replaceOrThrow("documents", null, ContentValues().apply {
+                                            put("uri", entry.uri); put("root", entry.treeUri)
+                                            put("entry", entry.toJson().put("contentVersion", version).toString())
+                                            put("path", sourcePath); put("revision", ""); put("generation", generation); put("warning", reason)
+                                        })
+                                        mutableStatus.value = mutableStatus.value.copy(
+                                            documents = mutableStatus.value.documents - if (previous?.revision?.isNotEmpty() == true) 1 else 0,
+                                            passages = mutableStatus.value.passages - removed)
+                                    }
+                                    changed = changed || previous == null || previous.revision.isNotEmpty() || previous.warning != reason
+                                    issue(key, sourcePath, reason, true)
                                 } finally { snapshot.delete() }
                             }
                         } catch (error: CancellationException) { throw error }
-                        catch (error: Exception) { excluded(path, error) }
+                        catch (error: Exception) { issue(identity(folder), path, error.message ?: "Unreadable folder", true) }
                     }
                     currentCoroutineContext().ensureActive()
-                    // Only a completed traversal reconciles deletions. Failed subtrees are excluded, not kept stale.
-                    withDatabase { it.delete("documents", "root=? AND generation<>?", arrayOf(root.treeUri, generation.toString())) }
+                    withDatabase { changed = (it.delete("documents", "root=? AND generation<>?", arrayOf(root.treeUri, generation.toString())) > 0) || changed }
                 }
-                val connected = repository.roots().map { it.treeUri }.toSet()
                 withDatabase { db ->
-                    removeDisconnected(db, connected)
-                    mutableStatus.value = SearchStatus(
-                        documents = scalar(db, "SELECT COUNT(*) FROM documents").toInt(),
-                        passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt(), failures = failures,
-                        message = if (failures == 0) "Index up to date" else "$failures exclusions/errors. $lastFailure",
-                    )
+                    changed = removeDisconnected(db, repository.connectedRootsSnapshot().map { it.treeUri }.toSet()) || changed
+                    publishCounts(db)
+                    mutableStatus.value = mutableStatus.value.copy(busy = false, failures = skipped.size, warnings = warned.size,
+                        message = if (lastIssue.isEmpty()) "Index up to date" else "Index complete. $lastIssue")
                 }
+                changed
             } catch (error: CancellationException) {
-                mutableStatus.value = mutableStatus.value.copy(busy = false, message = "Indexing paused; refresh to finish", failures = failures)
+                mutableStatus.value = mutableStatus.value.copy(busy = false, message = "Indexing paused; refresh to finish")
                 throw error
             } catch (error: Exception) {
-                mutableStatus.value = mutableStatus.value.copy(busy = false, failures = failures + 1, message = "Indexing failed: ${error.message}")
+                mutableStatus.value = mutableStatus.value.copy(busy = false, message = "Indexing failed: ${error.message}")
                 throw error
             } finally {
                 snapshot.delete()
@@ -209,9 +239,10 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
     }
 
     /** Extraction is disk-spooled without a SQL lock; only a complete document is published. */
-    private suspend fun replaceDocument(entry: DocumentEntry, path: String, revision: String, generation: Long, snapshot: File, version: Long) {
+    private suspend fun replaceDocument(entry: DocumentEntry, path: String, revision: String, generation: Long, snapshot: File, version: Long): Publication {
         val staged = File.createTempFile("search-passages-", ".tmp", context.cacheDir)
         var count = 0
+        var previousPassages = 0
         var warning = ""
         try {
             DataOutputStream(staged.outputStream().buffered()).use { output ->
@@ -249,6 +280,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
             withDatabase { db ->
                 db.beginTransaction()
                 try {
+                    previousPassages = passageCount(db, entry.uri)
                     db.delete("documents", "uri=?", arrayOf(entry.uri))
                     db.insertOrThrow("documents", null, ContentValues().apply {
                         put("uri", entry.uri); put("root", entry.treeUri); put("entry", entry.toJson().put("contentVersion", version).toString())
@@ -268,6 +300,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
                 } finally { db.endTransaction() }
             }
         } finally { staged.delete() }
+        return Publication(count - previousPassages, warning)
     }
 
     private suspend fun embedMissing(uri: String) {
@@ -291,6 +324,7 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
     suspend fun search(query: String, semantic: Boolean = false, limit: Int = 100): List<SearchHit> = withContext(Dispatchers.IO) {
         require(query.length <= MAX_QUERY_CHARS) { "Search supports up to $MAX_QUERY_CHARS characters." }
         if (query.isBlank() || limit <= 0) return@withContext emptyList()
+        repository.ready()
         val encoded = if (semantic) {
             check(semanticEngine.status.value.installed) { "Install the offline model to use hybrid search." }
             semanticEngine.encode(query)
@@ -400,13 +434,28 @@ class SearchIndex(private val repository: DocumentsRepository, private val seman
         }
     }
 
-    private fun removeDisconnected(db: SQLiteDatabase, roots: Set<String>) {
+    private fun removeDisconnected(db: SQLiteDatabase, roots: Set<String>): Boolean {
         val stale = ArrayList<String>()
         db.rawQuery("SELECT DISTINCT root FROM documents", null).use { while (it.moveToNext()) if (it.getString(0) !in roots) stale += it.getString(0) }
         stale.forEach { db.delete("documents", "root=?", arrayOf(it)) }
+        return stale.isNotEmpty()
     }
 
-    private data class IndexedSource(val entry: DocumentEntry, val revision: String, val version: Long, val warning: String)
+    private fun publishCounts(db: SQLiteDatabase) {
+        mutableStatus.value = mutableStatus.value.copy(documents = scalar(db, "SELECT COUNT(*) FROM documents WHERE revision<>''").toInt(),
+            passages = scalar(db, "SELECT COUNT(*) FROM passages").toInt())
+    }
+
+    private fun passageCount(db: SQLiteDatabase, uri: String): Int =
+        db.rawQuery("SELECT COUNT(*) FROM passages WHERE uri=?", arrayOf(uri)).use { it.moveToFirst(); it.getInt(0) }
+
+    private fun identity(entry: DocumentEntry): String {
+        val uri = Uri.parse(entry.uri)
+        return "${uri.authority}:${DocumentsContract.getDocumentId(uri)}"
+    }
+
+    private data class Publication(val passagesDelta: Int, val warning: String)
+    private data class IndexedSource(val entry: DocumentEntry, val revision: String, val version: Long, val warning: String, val embeddingError: String)
     private data class Ranked(val id: Long, val score: Double)
     private fun top(limit: Int) = PriorityQueue<Ranked>(limit, compareBy<Ranked> { it.score }.thenByDescending { it.id })
     private fun offer(heap: PriorityQueue<Ranked>, item: Ranked, limit: Int) {

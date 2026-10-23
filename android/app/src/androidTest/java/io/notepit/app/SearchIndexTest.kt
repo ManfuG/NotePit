@@ -324,9 +324,191 @@ class SearchIndexTest {
         assertEquals(2, hit.page)
         assertEquals(0, hit.line)
         assertEquals(5, index.status.value.failures)
-        assertTrue(index.status.value.message.contains("exclusions"))
         assertFalse(index.status.value.busy)
         assertTrue(index.search("inaccessible").isEmpty())
+    }
+
+    @Test fun searchingBeforeLibraryInitializationCannotErasePersistedPassages(): Unit = runBlocking {
+        provider.add("persisted.txt", "persistedBeforeInitialization")
+        index.refresh()
+        index.close()
+        val loading = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        context.beforeLibraryRead = {
+            loading.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+        }
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+        assertTrue(loading.await(5, TimeUnit.SECONDS))
+        val query = async(Dispatchers.IO) { index.search("persistedBeforeInitialization") }
+        try {
+            assertNull("Search must await library initialization, not treat it as disconnected",
+                kotlinx.coroutines.withTimeoutOrNull(250) { query.await() })
+        } finally {
+            context.beforeLibraryRead = null
+            release.countDown()
+        }
+        assertEquals("persisted.txt", query.await().single().entry.name)
+        assertEquals("persisted.txt", index.search("persistedBeforeInitialization").single().entry.name)
+    }
+
+    @Test fun unchangedExclusionsPersistAcrossRefreshAndRestartAndRecoverOnlyWhenRequested(): Unit = runBlocking {
+        val healthy = provider.add("healthy.txt", "healthyNeedle")
+        val binary = provider.add("binary.txt", byteArrayOf(0, 1, 2, 3))
+        val malformed = provider.add("malformed.pdf", "not a PDF".toByteArray(), "application/pdf")
+        val scanned = provider.add("scanned.pdf", pdf(listOf("", "")), "application/pdf")
+        val locked = provider.add("locked.txt", "unlockedNeedle")
+        provider.unreadableStreams += locked.id
+        val oversized = provider.add("oversized.txt", "")
+        java.io.RandomAccessFile(oversized.file, "rw").use { it.setLength(SearchIndex.MAX_TEXT_BYTES + 1) }
+
+        fun assertExcluded() {
+            assertFalse(index.status.value.busy)
+            assertEquals(1, index.status.value.documents)
+            assertEquals(5, index.status.value.failures)
+        }
+        index.refresh()
+        assertExcluded()
+        assertEquals("healthy.txt", index.search("healthyNeedle").single().entry.name)
+        val attempts = mapOf(healthy.id to 1, binary.id to 1, malformed.id to 1, scanned.id to 1, locked.id to 1)
+        assertEquals("Oversized metadata must exclude a source without opening it", attempts, provider.readAttempts)
+        val passages = index.status.value.passages
+        repeat(2) {
+            index.refresh()
+            assertExcluded()
+            assertEquals(passages, index.status.value.passages)
+            assertEquals("Unchanged excluded sources must not be opened again", attempts, provider.readAttempts)
+        }
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+        index.refresh()
+        assertExcluded()
+        assertEquals("Exclusion caching must survive index and repository recreation", attempts, provider.readAttempts)
+
+        // Restoring stream access alone does not change provider metadata.
+        provider.unreadableStreams -= locked.id
+        index.refresh()
+        assertExcluded()
+        assertTrue(index.search("unlockedNeedle").isEmpty())
+        assertEquals(attempts, provider.readAttempts)
+        index.refresh(force = true)
+        assertEquals(2, index.status.value.documents)
+        assertEquals(4, index.status.value.failures)
+        assertEquals("locked.txt", index.search("unlockedNeedle").single().entry.name)
+        assertEquals(attempts.mapValues { it.value + 1 }, provider.readAttempts)
+
+        val repairs = listOf(
+            binary to "binaryRecoveredNeedle".toByteArray(),
+            malformed to pdf(listOf("malformedRecoveredNeedle")),
+            scanned to pdf(listOf("scannedRecoveredNeedle")),
+            oversized to "oversizedRecoveredNeedle".toByteArray(),
+        )
+        for ((node, bytes) in repairs) {
+            val modified = node.file.lastModified()
+            node.file.writeBytes(bytes)
+            assertTrue(node.file.setLastModified(modified + 2_000))
+        }
+        index.refresh()
+        assertEquals(6, index.status.value.documents)
+        assertEquals(0, index.status.value.failures)
+        assertEquals("binary.txt", index.search("binaryRecoveredNeedle").single().entry.name)
+        assertEquals("malformed.pdf", index.search("malformedRecoveredNeedle").single().entry.name)
+        assertEquals("scanned.pdf", index.search("scannedRecoveredNeedle").single().entry.name)
+        assertEquals("oversized.txt", index.search("oversizedRecoveredNeedle").single().entry.name)
+        val repairedAttempts = attempts.mapValues { (_, count) -> count + 1 }.toMutableMap().apply {
+            this[binary.id] = 3; this[malformed.id] = 3; this[scanned.id] = 3; this[oversized.id] = 1
+        }
+        assertEquals("Only changed sources should be retried", repairedAttempts, provider.readAttempts)
+        index.refresh()
+        assertEquals(repairedAttempts, provider.readAttempts)
+        assertEquals(0, index.status.value.failures)
+    }
+
+    @Test fun failedReplacementRemovesOldPassagesAndRecoveryReplacesTheCachedFailure(): Unit = runBlocking {
+        val source = provider.add("changing.txt", "obsoleteNeedle")
+        index.refresh()
+        val modified = source.file.lastModified()
+        source.file.writeBytes(byteArrayOf(0, 1, 2, 3))
+        assertTrue(source.file.setLastModified(modified + 2_000))
+        index.refresh()
+        assertEquals(0, index.status.value.documents)
+        assertEquals(0, index.status.value.passages)
+        assertEquals(1, index.status.value.failures)
+        assertTrue(index.search("obsoleteNeedle").isEmpty())
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+        index.refresh()
+        assertEquals(mapOf(source.id to 2), provider.readAttempts)
+        assertTrue(index.search("obsoleteNeedle").isEmpty())
+        source.file.writeText("recoveredNeedle")
+        assertTrue(source.file.setLastModified(modified + 4_000))
+        index.refresh()
+        assertEquals(1, index.status.value.documents)
+        assertEquals(0, index.status.value.failures)
+        assertEquals("changing.txt", index.search("recoveredNeedle").single().entry.name)
+        assertEquals(mapOf(source.id to 3), provider.readAttempts)
+    }
+
+    @Test fun partiallyTextualPdfRemainsIndexedWithOnePersistentWarningPerSource(): Unit = runBlocking {
+        val paper = provider.add("mixed.pdf", pdf(listOf("", "searchablePdfNeedle", "", "")), "application/pdf")
+        fun assertIndexedWithWarning() {
+            assertFalse(index.status.value.busy)
+            assertEquals(1, index.status.value.documents)
+            assertTrue(index.status.value.passages > 0)
+            assertEquals("Blank pages must not mark a searchable PDF as excluded", 0, index.status.value.failures)
+            assertEquals("Several blank pages are one source warning", 1, index.status.value.warnings)
+        }
+        index.refresh()
+        assertIndexedWithWarning()
+        val hit = index.search("searchablePdfNeedle").single()
+        assertEquals("mixed.pdf", hit.entry.name)
+        assertEquals(2, hit.page)
+        index.refresh()
+        assertIndexedWithWarning()
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+        index.refresh()
+        assertIndexedWithWarning()
+        assertEquals(mapOf(paper.id to 1), provider.readAttempts)
+        assertEquals(2, index.search("searchablePdfNeedle").single().page)
+    }
+
+    @Test fun providerCyclesAndDuplicateRowsAcrossTreeAliasesIndexEachSourceOnce(): Unit = runBlocking {
+        val folder = provider.add("Nested", byteArrayOf(), Document.MIME_TYPE_DIR)
+        val paper = provider.add("unique.txt", "cycleSafeNeedle").also { it.parent = folder.id }
+        val failed = provider.add("binary.txt", byteArrayOf(0, 1, 2, 3)).also { it.parent = folder.id }
+        provider.additionalChildren["root"] = listOf(folder.id, paper.id, failed.id)
+        provider.additionalChildren[folder.id] = listOf(folder.id, "root", paper.id, failed.id)
+        // Both grants expose the same provider document IDs through different tree URIs.
+        val nestedTree = DocumentsContract.buildTreeDocumentUri(AUTHORITY, folder.id)
+        val nestedRoot = DocumentEntry(
+            DocumentsContract.buildDocumentUriUsingTree(nestedTree, folder.id).toString(),
+            folder.name, directory = true, treeUri = nestedTree.toString(),
+        )
+        val roots = org.json.JSONArray().put(root.toJson()).put(nestedRoot.toJson())
+        context.getSharedPreferences("notepit-library", 0).edit()
+            .putString("state", org.json.JSONObject().put("roots", roots).toString()).commit()
+        index.close()
+        repository = DocumentsRepository(context)
+        index = SearchIndex(repository, model)
+
+        withTimeout(5_000) { index.refresh(force = true) }
+        assertFalse(index.status.value.busy)
+        assertEquals(1, index.status.value.documents)
+        assertEquals("Repeated rows and tree aliases must not multiply exclusions", 1, index.status.value.failures)
+        assertEquals("unique.txt", index.search("cycleSafeNeedle").single().entry.name)
+        assertEquals("Each canonical source must be opened once even during a rebuild", mapOf(paper.id to 1, failed.id to 1), provider.readAttempts)
+        withTimeout(5_000) { index.refresh() }
+        assertEquals(1, index.status.value.documents)
+        assertEquals(1, index.status.value.failures)
+        assertEquals(mapOf(paper.id to 1, failed.id to 1), provider.readAttempts)
+        withTimeout(5_000) { index.refresh(force = true) }
+        assertEquals(mapOf(paper.id to 2, failed.id to 2), provider.readAttempts)
+        assertEquals(1, index.search("cycleSafeNeedle").size)
     }
 
     /** Runnable smoke/benchmark: logs measured numbers, never hard-codes accuracy/performance claims. */
@@ -404,12 +586,16 @@ class SearchIndexTest {
         private val prefix = "search-test-${UUID.randomUUID()}-"
         val privateDirectory = File(base.filesDir, prefix).apply { mkdirs() }
         val resolver = MockContentResolver(this)
+        @Volatile var beforeLibraryRead: (() -> Unit)? = null
         override fun getApplicationContext(): Context = this
         override fun getContentResolver() = resolver
         override fun getFilesDir() = File(privateDirectory, "files").apply { mkdirs() }
         override fun getCacheDir() = File(privateDirectory, "cache").apply { mkdirs() }
         override fun getNoBackupFilesDir() = File(privateDirectory, "no-backup").apply { mkdirs() }
-        override fun getSharedPreferences(name: String, mode: Int): SharedPreferences = super.getSharedPreferences(prefix + name, mode)
+        override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+            if (name == "notepit-library") beforeLibraryRead?.invoke()
+            return super.getSharedPreferences(prefix + name, mode)
+        }
         override fun checkUriPermission(uri: Uri?, pid: Int, uid: Int, modeFlags: Int) = PackageManager.PERMISSION_GRANTED
         override fun checkPermission(permission: String, pid: Int, uid: Int) = PackageManager.PERMISSION_GRANTED
     }
@@ -420,6 +606,9 @@ class SearchIndexTest {
         private val rootNode = Node("root", "Search root", Document.MIME_TYPE_DIR, directory, parent = "")
         val nodes = LinkedHashMap<String, Node>()
         val denied = HashSet<String>()
+        val unreadableStreams = HashSet<String>()
+        val additionalChildren = HashMap<String, List<String>>()
+        val readAttempts = HashMap<String, Int>()
         val reads = HashMap<String, Int>()
         var sawMainThread = false
         var beforeOpen: ((String) -> Unit)? = null
@@ -456,18 +645,19 @@ class SearchIndexTest {
             if (parentDocumentId in denied) throw SecurityException("Unreadable folder")
             if (parentDocumentId != "root" && nodes[parentDocumentId]?.mime != Document.MIME_TYPE_DIR) throw FileNotFoundException(parentDocumentId)
             return MatrixCursor(projection ?: COLUMNS).apply {
-                for (node in nodes.values) {
-                    if (node.parent != parentDocumentId) continue
+                val childIds = nodes.values.filter { it.parent == parentDocumentId }.map { it.id } + additionalChildren[parentDocumentId].orEmpty()
+                for (id in childIds) {
                     // Listing can expose a document whose stream subsequently becomes unreadable.
-                    val blocked = denied.remove(node.id)
-                    try { row(this, node.id) } finally { if (blocked) denied.add(node.id) }
+                    val blocked = denied.remove(id)
+                    try { row(this, id) } finally { if (blocked) denied.add(id) }
                 }
             }
         }
         override fun openDocument(documentId: String, mode: String, signal: CancellationSignal?): ParcelFileDescriptor {
             thread(); signal?.throwIfCanceled()
+            if (!mode.contains('w')) readAttempts[documentId] = (readAttempts[documentId] ?: 0) + 1
             beforeOpen?.invoke(documentId)
-            if (documentId in denied) throw SecurityException("Unreadable test document")
+            if (documentId in denied || documentId in unreadableStreams) throw SecurityException("Unreadable test document")
             val node = nodes[documentId] ?: throw FileNotFoundException(documentId)
             if (!mode.contains('w')) reads[documentId] = (reads[documentId] ?: 0) + 1
             return ParcelFileDescriptor.open(node.file, ParcelFileDescriptor.parseMode(mode))

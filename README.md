@@ -11,7 +11,7 @@ Offline-first Android document manager, PDF reader and code editor with local fu
 
 [Project page](https://giacomo-manfucci.pages.dev/projects/notepit/) · [Latest release and checksums](https://github.com/ManfuG/NotePit/releases/latest)
 
-Current release: **[0.4.3](https://github.com/ManfuG/NotePit/releases/tag/v0.4.3)** (Android version code 7), indexing new or changed files without rereading unchanged contents on reopening. Android-only: the project page is not a browser document editor. Requires Android **8.0/API 26+** and an updated Android System WebView.
+Current release: **[0.4.4](https://github.com/ManfuG/NotePit/releases/tag/v0.4.4)** (Android version code 8), fixing repeated indexing and persistent exclusion retries. Android-only: the project page is not a browser document editor. Requires Android **8.0/API 26+** and an updated Android System WebView.
 
 ## Demo
 
@@ -47,9 +47,10 @@ The signed release uses a persistent private signing key for subsequent updates.
 - **Text search (0.3):** search document contents across granted folders, not just filenames. A private SQLite FTS4 index ranks passages with BM25 and retains text line ranges or PDF page references.
 - **Hybrid semantic search (0.4):** optionally combine text ranking with local dense-vector similarity using reciprocal-rank fusion. Scores express relative relevance, not calibrated probabilities. Semantic results can be approximate, not literal query matches.
 - Results include source paths and snippets. Opening a result reveals its text range or PDF page; literal occurrences are highlighted, while approximate semantic passages are labeled. Next/previous controls move between revealed matches.
-- First connection indexes every supported file in the folder. Later foreground/provider refreshes reconcile directory metadata and read only new or changed files; existing text and embeddings are retained. **Refresh** explicitly verifies/rebuilds all files. Unreadable or incomplete extraction is reported.
+- First connection indexes every supported file in the folder and finishes with either an up-to-date index or reported exclusions. Later checks read only new/changed sources. Successful and excluded outcomes survive reopening; unchanged failures are not repeatedly opened. **Refresh** explicitly verifies/rebuilds all files and retries exclusions.
 - Indexing is bounded: up to **16 MiB per text file**, **64 MiB and 2,000 pages per PDF**, and **25,000 passages per document**. Oversized, encrypted, extraction-restricted or image-only PDFs are reported as exclusions; there is no OCR. Queries are limited to **256 characters** and results to **100 hits**.
-- PDF indexing requires an extractable text layer. Search does not grant extra filesystem access, change originals, or replace explicit document saves. Automatic checks compare size, modification time, format and persistent document-change markers. NotePit saves and document-specific provider notifications invalidate only that document. External edits that preserve metadata and produce no usable notification require explicit **Refresh**.
+- PDF indexing requires an extractable text layer. Original files are never changed by indexing. Automatic checks compare size, modification time, format and persistent change markers. NotePit saves and typed provider updates invalidate that document; untyped notifications are metadata hints, not proof of a write. Read-generated hints settle after validation rather than restarting indefinitely. Silent/ambiguous external edits can require explicit **Refresh**.
+- **Skipped** counts excluded sources, not partially searchable documents. PDFs with some blank/image-only pages and retained keyword results with semantic errors are **warnings**. Cycles, duplicate listings and overlapping grants do not multiply source counts or extraction.
 
 #### Optional semantic model
 
@@ -159,7 +160,7 @@ API 36 x86_64 emulator; synthetic fixtures, not physical-phone or general retrie
 
 The semantic check ran with Wi-Fi and mobile data disabled after explicit model installation. Its four questions are a smoke check, not an estimated real-world accuracy rate. Process PSS includes the Android test runtime and shared mappings; it is not a model-only allocation or a peak-memory measurement.
 
-Verification includes 12 editor invariants, 10 tokenizer unit tests, 20 SAF/storage tests, 13 native index tests, 7 loopback sync tests and the opt-in real-model smoke. Index coverage includes zero unchanged-source reads across index/repository recreation, changed-file-only reads, saves with missing provider metadata, explicit verification of silent external edits, removal/disconnection, encoding and coordinates, exclusions, BM25 ordering, queries during a blocked refresh, and changing folder metadata without self-triggered reindexing.
+For 0.4.4, 12 editor invariants, 15 JVM tests (10 tokenizer, 5 refresh scheduling) and 41 device tests (20 SAF/storage, 18 index, 3 real-provider notification tests) passed. Coverage includes noisy query/open notifications settling at 44 indexed documents with stable exclusions, cold restart without source rereads, single-source typed updates, edits/additions/deletions during scans, cached failures and recovery, partial-PDF warnings, canonical cycle/alias deduplication, initialization ordering and cancelled forced rebuilds. Existing loopback sync and opt-in real-model tests remain separate; they were not rerun for this indexing-only fix.
 
 To repeat the real-model smoke after installing the model through the app and disabling device networking:
 
@@ -172,6 +173,10 @@ adb shell am instrument -w -r \
 ### Repository privacy
 
 Current project examples and documentation use generic identities; third-party attribution is retained. The audit found no probable committed live credentials or private signing keys. Four pre-existing commits retain personal author/committer metadata and older documentation references. No published history was rewritten: removing that exposure requires a separately coordinated history cleanup, including existing clones and cached artifacts. Use privacy-safe author/committer settings for future commits.
+
+### [0.4.4](https://github.com/ManfuG/NotePit/releases/tag/v0.4.4) — finite indexing and stable exclusions
+
+Shares provider observation, separates write notifications from metadata hints, and ends read-notification feedback after validation. Failed sources are cached until changed or explicitly retried. Also fixes duplicate/cyclic traversal, warning/exclusion counts, premature index deletion during library initialization and lost forced-refresh requests during cancellation. Existing grants, drafts and indexed content are retained.
 
 ### [0.4.3](https://github.com/ManfuG/NotePit/releases/tag/v0.4.3) — changed-file-only indexing
 

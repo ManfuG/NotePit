@@ -2,5 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
         <uses-library android:name="android.test.mock" android:required="false" />
+        <provider
+            android:name="io.notepit.app.NotifyingSearchProvider"
+            android:authorities="io.notepit.app.search.feedback.tests"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:readPermission="android.permission.MANAGE_DOCUMENTS"
+            android:writePermission="android.permission.MANAGE_DOCUMENTS">
+            <path-permission android:path="/control" android:permission="android.permission.INTERNET" />
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
     </application>
 </manifest>

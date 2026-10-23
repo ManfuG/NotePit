@@ -65,7 +65,7 @@ fun SearchScreen(model: DocumentSessions, onBack: () -> Unit, onOpen: (Int) -> U
                 else if (!installation.installed) "Keyword search works offline. Semantic search needs an optional model; nothing downloads automatically."
                 else "Literal, case-insensitive text matches · fully offline.", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall)
             if (index.busy || model.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("${index.documents} documents · ${index.passages} passages" + if (index.failures > 0) " · ${index.failures} unavailable/skipped" else "",
+            Text("${index.documents} documents · ${index.passages} passages" + (if (index.failures > 0) " · ${index.failures} skipped" else "") + (if (index.warnings > 0) " · ${index.warnings} warnings" else ""),
                 Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall)
             if (index.message.isNotBlank()) Text(index.message, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
             model.searchError?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }

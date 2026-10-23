@@ -67,8 +67,7 @@ class DocumentSessions(application: Application, private val savedState: SavedSt
     private var queryJob: Job? = null
     private var modelJob: Job? = null
     private var providerObserver: Closeable? = null
-    private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
-    private var forceRefresh = false
+    private val refreshRequests = IndexRefreshQueue()
     private var queryVersion = 0L
     var downloadingSearchModel by mutableStateOf(false)
         private set
@@ -401,27 +400,21 @@ class DocumentSessions(application: Application, private val savedState: SavedSt
             searching = false
             return
         }
-        providerObserver = repository.observe { refreshSearch() }
-        refreshJob = viewModelScope.launch {
-            for (ignored in refreshRequests) {
-                delay(650)
-                // Drain bursts without cancelling an in-progress provider scan.
-                while (refreshRequests.tryReceive().isSuccess) { }
-                val force = forceRefresh
-                forceRefresh = false
-                try { searchIndex.refresh(force); runSearch() }
-                catch (cancelled: CancellationException) { forceRefresh = forceRefresh || force; throw cancelled }
-                catch (error: Exception) { searchError = error.message ?: "The search index could not be refreshed." }
-            }
-        }
+        providerObserver = repository.observe(onChange = { refreshSearch() },
+            onProviderChange = { refreshRequests.request(providerHint = true) })
         refreshSearch()
         runSearch()
         checkActive()
     }
 
     fun refreshSearch(force: Boolean = false) {
-        forceRefresh = forceRefresh || force
-        if (foreground) refreshRequests.trySend(Unit)
+        refreshRequests.request(force = force)
+        if (!foreground || refreshJob?.isActive == true) return
+        refreshJob = viewModelScope.launch {
+            try { refreshRequests.run { rebuild -> searchIndex.refresh(rebuild).also { runSearch() } } }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { searchError = error.message ?: "The search index could not be refreshed." }
+        }
     }
 
     fun downloadSearchModel() {
