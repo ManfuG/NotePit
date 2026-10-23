@@ -11,7 +11,7 @@ Offline-first Android document manager, PDF reader and code editor with local fu
 
 [Project page](https://giacomo-manfucci.pages.dev/projects/notepit/) · [Latest release and checksums](https://github.com/ManfuG/NotePit/releases/latest)
 
-Current release: **[0.4.1](https://github.com/ManfuG/NotePit/releases/tag/v0.4.1)** (Android version code 5), including the branded opening and security-tooling updates. Android-only: the project page is not a browser document editor. Requires Android **8.0/API 26+** and an updated Android System WebView.
+Current release: **[0.4.2](https://github.com/ManfuG/NotePit/releases/tag/v0.4.2)** (Android version code 6), fixing folder flicker and repeated indexing. Android-only: the project page is not a browser document editor. Requires Android **8.0/API 26+** and an updated Android System WebView.
 
 ## Demo
 
@@ -36,7 +36,7 @@ The signed release uses a persistent private signing key for subsequent updates.
 
 ### Files
 
-- Persistent read/write SAF access to multiple folders, direct-child progressive loading and bounded directory caching.
+- Persistent read/write SAF access to multiple folders, progressive initial loading, stable same-folder refreshes and bounded directory caching.
 - Filename search in the current folder, subfolders or all roots; name/date/size sorting, direction and type/conflict filters.
 - Favorites, recent documents, long-press multiselect, contextual menus and bottom actions.
 - Create, rename, copy, move and delete files/folders. Recursive transfers verify bytes and membership before removing a source; collisions and partial failures are reported, not silently overwritten.
@@ -159,7 +159,7 @@ API 36 x86_64 emulator; synthetic fixtures, not physical-phone or general retrie
 
 The semantic check ran with Wi-Fi and mobile data disabled after explicit model installation. Its four questions are a smoke check, not an estimated real-world accuracy rate. Process PSS includes the Android test runtime and shared mappings; it is not a model-only allocation or a peak-memory measurement.
 
-Verification includes 12 editor invariants, 10 tokenizer unit tests, 20 SAF/storage tests, 11 native index tests, 7 loopback sync tests and the opt-in real-model smoke. The index tests cover timestamp-preserving external changes, removal/disconnection, encoding and coordinates, exclusions, BM25 ordering, and queries during a blocked refresh.
+Verification includes 12 editor invariants, 10 tokenizer unit tests, 20 SAF/storage tests, 12 native index tests, 7 loopback sync tests and the opt-in real-model smoke. The index tests cover timestamp-preserving external changes, removal/disconnection, encoding and coordinates, exclusions, BM25 ordering, queries during a blocked refresh, and changing folder metadata without self-triggered reindexing.
 
 To repeat the real-model smoke after installing the model through the app and disabling device networking:
 
@@ -172,6 +172,10 @@ adb shell am instrument -w -r \
 ### Repository privacy
 
 Current project examples and documentation use generic identities; third-party attribution is retained. The audit found no probable committed live credentials or private signing keys. Four pre-existing commits retain personal author/committer metadata and older documentation references. No published history was rewritten: removing that exposure requires a separately coordinated history cleanup, including existing clones and cached artifacts. Use privacy-safe author/committer settings for future commits.
+
+### [0.4.2](https://github.com/ManfuG/NotePit/releases/tag/v0.4.2) — stable folder refresh
+
+Folder metadata reads no longer trigger another browse/index refresh. Provider observation avoids overlapping registrations, and the browser retains rows during same-folder refreshes without duplicate change subscriptions. Navigation still clears the previous folder. Content hashing and incremental extraction are unchanged.
 
 ### [0.4.1](https://github.com/ManfuG/NotePit/releases/tag/v0.4.1) — suite alignment and security
 

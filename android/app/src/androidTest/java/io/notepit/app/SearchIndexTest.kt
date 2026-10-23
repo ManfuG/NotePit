@@ -121,6 +121,17 @@ class SearchIndexTest {
         assertTrue(index.search("disconnect").isEmpty())
     }
 
+    @Test fun indexingChangingRootMetadataDoesNotScheduleItselfAgain(): Unit = runBlocking {
+        provider.add("stable.txt", "stableNeedle")
+        provider.changingRootMetadata = true
+        val revision = repository.changes.value
+        index.refresh()
+        assertFalse(index.status.value.busy)
+        assertEquals("stable.txt", index.search("stableNeedle").single().entry.name)
+        assertEquals("Reading provider metadata must not invalidate the library", revision, repository.changes.value)
+        assertEquals(0, index.status.value.failures)
+    }
+
     @Test fun traversesNestedFoldersAndPurgesUnreadableSubtrees(): Unit = runBlocking {
         val folder = provider.add("Nested", byteArrayOf(), Document.MIME_TYPE_DIR)
         val nested = provider.add("inside.rs", "nestedNeedle").also { it.parent = folder.id }
@@ -375,6 +386,8 @@ class SearchIndexTest {
         val denied = HashSet<String>()
         var sawMainThread = false
         var beforeOpen: (() -> Unit)? = null
+        var changingRootMetadata = false
+        private var rootModified = 0L
         init { directory.mkdirs() }
         fun add(name: String, text: String) = add(name, text.toByteArray(), "text/plain")
         fun add(name: String, bytes: ByteArray, mime: String = "text/plain"): Node {
@@ -392,7 +405,7 @@ class SearchIndexTest {
                 Document.COLUMN_MIME_TYPE -> node.mime
                 Document.COLUMN_FLAGS -> if (node.mime == Document.MIME_TYPE_DIR) Document.FLAG_DIR_SUPPORTS_CREATE else Document.FLAG_SUPPORTS_WRITE or Document.FLAG_SUPPORTS_DELETE
                 Document.COLUMN_SIZE -> 0L
-                Document.COLUMN_LAST_MODIFIED -> 0L
+                Document.COLUMN_LAST_MODIFIED -> if (id == "root" && changingRootMetadata) ++rootModified else 0L
                 else -> null
             } }.toTypedArray())
         }

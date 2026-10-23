@@ -154,8 +154,8 @@ class DocumentsRepository(context: Context) {
                 try { queryRaw(entry) } catch (error: CancellationException) { throw error }
                 catch (_: Exception) { entry.copy(available = false, writable = false) }
             }
-            persist()
-            if (rootEntries != previous) changed()
+            // Metadata reads must not feed observers back into another browse/index refresh.
+            if (rootEntries != previous) persist()
             rootEntries.toList()
         }
     }
@@ -520,10 +520,8 @@ class DocumentsRepository(context: Context) {
             var registered = emptySet<String>()
             try {
                 changes.collect {
-                    val watched = rootEntries.flatMap { root ->
-                        val tree = Uri.parse(root.treeUri)
-                        listOf(root.treeUri, root.uri, childrenUri(root).toString(),
-                            Uri.Builder().scheme("content").authority(tree.authority).build().toString())
+                    val watched = rootEntries.map { root ->
+                        Uri.Builder().scheme("content").authority(Uri.parse(root.treeUri).authority).build().toString()
                     }.toSet()
                     if (registered != watched) {
                         resolver.unregisterContentObserver(observer)

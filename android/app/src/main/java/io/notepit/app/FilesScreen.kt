@@ -42,6 +42,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -64,7 +65,6 @@ fun FilesScreen(
     onContentSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val scope = rememberCoroutineScope()
     val operations: FilesViewModel = viewModel()
     val haptic = LocalHapticFeedback.current
     val lifecycle = LocalLifecycleOwner.current
@@ -80,7 +80,6 @@ fun FilesScreen(
     var actionEntries by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
     var input by rememberSaveable { mutableStateOf("") }
     var roots by remember { mutableStateOf(emptyList<DocumentEntry>()) }
-    var entries by remember { mutableStateOf(emptyList<DocumentEntry>()) }
     var favorites by remember { mutableStateOf(emptySet<String>()) }
     var loading by remember { mutableStateOf(false) }
     val busy = operations.busy
@@ -90,12 +89,12 @@ fun FilesScreen(
     var rootMenu by remember { mutableStateOf(false) }
     var sortMenu by remember { mutableStateOf(false) }
     var filterMenu by remember { mutableStateOf(false) }
-    val revision by repository.changes.collectAsState()
     val current = remember(path, mode) { if (mode == "Files") path.lastOrNull()?.let(::decode) else null }
     val displayError = error ?: operations.error?.let(::errorText)
     val targets = remember(actionEntries) { actionEntries.map(::decode) }
     val rootView = mode == "Files" && current == null && (search.isBlank() || searchScope == "Folder")
     val remoteQuery = if (searchScope == "Folder") "" else search.trim()
+    var entries by remember(current?.uri, mode, remoteQuery, searchScope) { mutableStateOf(emptyList<DocumentEntry>()) }
 
     fun navigate(entry: DocumentEntry) {
         if (busy) return
@@ -147,15 +146,14 @@ fun FilesScreen(
     BackHandler(!busy && (selected.isNotEmpty() || search.isNotEmpty() || path.isNotEmpty() || mode != "Files")) { back() }
     BackHandler(busy) { }
     DisposableEffect(repository, lifecycle) {
-        val observer = repository.observe { scope.launch { refresh++ } }
+        val observer = repository.observe { refresh++ }
         val resume = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refresh++ }
         lifecycle.lifecycle.addObserver(resume)
         onDispose { observer.close(); lifecycle.lifecycle.removeObserver(resume) }
     }
-    LaunchedEffect(repository, revision, refresh, path, mode, remoteQuery, searchScope) {
+    LaunchedEffect(repository, refresh, current?.uri, mode, remoteQuery, searchScope) {
         loading = true
         error = null
-        entries = emptyList()
         try {
             roots = repository.roots()
             favorites = repository.favorites()
@@ -185,7 +183,9 @@ fun FilesScreen(
                     val fresh = repository.query(current)
                     if (!fresh.available) throw SecurityException("Folder permission is unavailable")
                     if (fresh != current) path = ArrayList(path.dropLast(1) + encode(fresh))
-                    repository.list(fresh).collectLatest { entries = it; loading = false }
+                    val listing = repository.list(fresh)
+                    if (entries.isEmpty()) listing.collectLatest { entries = it; loading = false }
+                    else entries = listing.last()
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
